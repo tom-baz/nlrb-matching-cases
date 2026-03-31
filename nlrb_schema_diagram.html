@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NLRB Tables Schema</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #2c5282;
+        }
+        h2 {
+            color: #2c5282;
+            border-bottom: 2px solid #2a6fdb;
+            padding-bottom: 8px;
+            margin-top: 30px;
+        }
+        .diagram-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .info-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        ul {
+            line-height: 1.8;
+        }
+        li strong {
+            color: #2c5282;
+        }
+        code {
+            background-color: #e2e8f0;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>NLRB Tables Schema</h1>
+    <p style="text-align: center; color: #666;">Database schema for NLRB R Cases and C Cases, consolidated from three filing systems: NxGen, CATS, and CHIPS.</p>
+    
+    <div class="diagram-container">
+        <h2>Entity Relationship Diagram</h2>
+        <div class="mermaid">
+erDiagram
+    R_CASES ||--o{ ELECTIONS : ""
+    R_CASES ||--|| R_CASES_ADDRESS : ""
+    C_CASES ||--|| C_CASES_ADDRESS : ""
+    
+    R_CASES {
+        string r_case_number
+        string type
+        date date_filed
+        date date_closed
+        string filing_system
+    }
+    
+    R_CASES_ADDRESS {
+        string r_case_number
+        string company_name
+        string state
+        string city
+        string zip_code
+        string filing_system
+    }
+    
+    ELECTIONS {
+        string r_case_number
+        string unit
+        date election_date
+        string election_result
+        string union_won
+        float pct_votes_for
+        float union_representation
+        string filing_system
+    }
+    
+    C_CASES {
+        string c_case_number
+        string type
+        date date_filed
+        string allegations
+        string merit
+        string filing_system
+    }
+    
+    C_CASES_ADDRESS {
+        string c_case_number
+        string company_name
+        string state
+        string city
+        string zip_code
+        string filing_system
+    }
+        </div>
+    </div>
+    
+    <div class="info-container">
+        <h2>Relationships</h2>
+        <ul>
+            <li><strong>R_CASES to ELECTIONS:</strong> One-to-many (one R case can have multiple elections in different units)</li>
+            <li><strong>R_CASES to R_CASES_ADDRESS:</strong> One-to-one (each R case has one address record)</li>
+            <li><strong>C_CASES to C_CASES_ADDRESS:</strong> One-to-one (each C case has one address record)</li>
+        </ul>
+        
+        <h2>Key Fields</h2>
+        <ul>
+            <li>R-related tables are linked via the <code>r_case_number</code> field</li>
+            <li>C-related tables are linked via the <code>c_case_number</code> field</li>
+        </ul>
+    </div>
+    
+    <script>
+        mermaid.initialize({ 
+            startOnLoad: true,
+            theme: 'default',
+            themeVariables: {
+                primaryColor: '#2a6fdb',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#0f3f77',
+                lineColor: '#0f3f77',
+                secondaryColor: '#2a6fdb',
+                tertiaryColor: '#fff'
+            }
+        });
+    </script>
+</body>
+</html>
