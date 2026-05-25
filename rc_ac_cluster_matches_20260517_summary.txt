@@ -1,0 +1,45 @@
+============================================================
+MATCHING SUMMARY
+============================================================
+
+Match mode:  exact
+
+RC cases in dataset:          141,732
+RC cases with ≥1 CA match:     29,554  (20.9%)
+
+CA cases in dataset:          754,030
+CA cases matched to ≥1 RC:     55,611  (7.4%)
+
+Total match pairs:             60,731
+
+Match pairs by method:
+   exact:     60,731  (100.0%)
+
+CA cases per matched RC case:
+  mean   = 2.05
+  median = 1.0
+  max    = 272
+  p90    = 4
+  p99    = 12
+
+RC cases per matched CA case:
+  mean   = 1.09
+  median = 1.0
+  max    = 17
+  CA cases matched to >1 RC: 3,496 (6.3%)
+
+============================================================
+NOTES
+============================================================
+- Company-name matching uses the advanced preprocessing pipeline:
+  preprocessing_v3.py (OCR fixes, slash handling, DBA removal,
+  digit stripping, stop-word removal with hyphen guards, etc.)
+  followed by name_standardization.py (canonical-form replacement
+  for high-frequency firms such as USPS, GM, Kaiser, Ford, Red Cross).
+- Rows where company_name is actually an NLRB case number are
+  filtered out before matching.
+- State and city are normalised with simple lowercasing and
+  whitespace collapse.
+- R Cases with a missing date_closed are excluded from matching.
+- A single CA case *can* match multiple RC cases. The summary above
+  reports how common this is so you can decide how to handle it.

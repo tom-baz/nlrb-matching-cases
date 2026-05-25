@@ -61,7 +61,9 @@ erDiagram
     R_CASES ||--o{ ELECTIONS : ""
     R_CASES ||--|| R_CASES_ADDRESS : ""
     C_CASES ||--|| C_CASES_ADDRESS : ""
-    
+    R_CASES ||--o{ RC_AC_MATCHES : ""
+    C_CASES ||--o{ RC_AC_MATCHES : ""
+
     R_CASES {
         string r_case_number
         string type
@@ -69,7 +71,7 @@ erDiagram
         date date_closed
         string filing_system
     }
-    
+
     R_CASES_ADDRESS {
         string r_case_number
         string company_name
@@ -78,7 +80,7 @@ erDiagram
         string zip_code
         string filing_system
     }
-    
+
     ELECTIONS {
         string r_case_number
         string unit
@@ -89,7 +91,7 @@ erDiagram
         float union_representation
         string filing_system
     }
-    
+
     C_CASES {
         string c_case_number
         string type
@@ -98,7 +100,7 @@ erDiagram
         string merit
         string filing_system
     }
-    
+
     C_CASES_ADDRESS {
         string c_case_number
         string company_name
@@ -107,21 +109,55 @@ erDiagram
         string zip_code
         string filing_system
     }
+
+    RC_AC_MATCHES {
+        string r_case_number
+        string c_case_number
+        date r_date_filed
+        date r_date_closed
+        date c_date_filed
+        string r_company_name
+        string r_state
+        string r_city
+        string c_company_name
+        string c_state
+        string c_city
+        string match_company_r
+        string match_company_c
+        string match_state_r
+        string match_state_c
+        string match_city_r
+        string match_city_c
+        string match_method
+        float fuzzy_score
+    }
         </div>
     </div>
-    
+
     <div class="info-container">
         <h2>Relationships</h2>
         <ul>
             <li><strong>R_CASES to ELECTIONS:</strong> One-to-many (one R case can have multiple elections in different units)</li>
             <li><strong>R_CASES to R_CASES_ADDRESS:</strong> One-to-one (each R case has one address record)</li>
             <li><strong>C_CASES to C_CASES_ADDRESS:</strong> One-to-one (each C case has one address record)</li>
+            <li><strong>R_CASES to RC_AC_MATCHES:</strong> One-to-many (each RC petition may match zero or more CA charges)</li>
+            <li><strong>C_CASES to RC_AC_MATCHES:</strong> One-to-many (each CA charge may match zero or more RC petitions)</li>
         </ul>
-        
+
         <h2>Key Fields</h2>
         <ul>
             <li>R-related tables are linked via the <code>r_case_number</code> field</li>
             <li>C-related tables are linked via the <code>c_case_number</code> field</li>
+            <li><code>RC_AC_MATCHES</code> is a bridge table resolving the many-to-many link between RC petitions and CA charges filed during the petition's active window at the same establishment</li>
+        </ul>
+
+        <h2>RC_AC_MATCHES Table Notes</h2>
+        <p>Produced by <code>match_r_to_c_cases.py</code> (fuzzy matching) or a clustering-based matcher; both methods write the same schema to <code>rc_ac_matches.parquet</code> / <code>rc_ac_matches.csv</code>.</p>
+        <ul>
+            <li><code>r_*</code> / <code>c_*</code> columns carry the original company and location values from each side.</li>
+            <li><code>match_company_*</code>, <code>match_state_*</code>, <code>match_city_*</code> are the preprocessed/normalized forms that were actually compared.</li>
+            <li><code>match_method</code> indicates how the pair was linked: <code>exact</code>, <code>fuzzy</code>, or (for the clustering-based output) <code>cluster</code>.</li>
+            <li><code>fuzzy_score</code> is the <code>rapidfuzz.token_sort_ratio</code> score on company names for fuzzy pairs; <code>100.0</code> for exact matches; may be null/NA for cluster-based matches.</li>
         </ul>
     </div>
     

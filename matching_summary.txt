@@ -1,0 +1,76 @@
+============================================================
+MATCHING SUMMARY
+============================================================
+
+Match mode:  hybrid
+  Company fuzzy threshold: 82
+  City fuzzy threshold:    85
+
+RC cases in dataset:          141,732
+RC cases with ≥1 CA match:     25,867  (18.3%)
+
+CA cases in dataset:          754,030
+CA cases matched to ≥1 RC:     46,573  (6.2%)
+
+Total match pairs:             50,472
+
+Match pairs by method:
+   exact:     38,962  (77.2%)
+   fuzzy:     11,510  (22.8%)
+
+Fuzzy score distribution (fuzzy matches only):
+  mean   = 92.4
+  median = 93.5
+  min    = 82.0
+  p10    = 84.2
+  p25    = 87.7
+
+CA cases per matched RC case:
+  mean   = 1.95
+  median = 1.0
+  max    = 272
+  p90    = 4
+  p99    = 11
+
+RC cases per matched CA case:
+  mean   = 1.08
+  median = 1.0
+  max    = 17
+  CA cases matched to >1 RC: 2,609 (5.6%)
+
+============================================================
+NOTES
+============================================================
+- Company-name matching uses the advanced preprocessing pipeline:
+  preprocessing_v3.py (OCR fixes, slash handling, DBA removal,
+  digit stripping, stop-word removal with hyphen guards, etc.)
+  followed by name_standardization.py (canonical-form replacement
+  for high-frequency firms such as USPS, GM, Kaiser, Ford, Red Cross).
+- Rows where company_name is actually an NLRB case number are
+  filtered out before matching.
+- State and city are normalised with simple lowercasing and
+  whitespace collapse.
+- R Cases with a missing date_closed are excluded from matching.
+- A single CA case *can* match multiple RC cases. The summary above
+  reports how common this is so you can decide how to handle it.
+
+Fuzzy matching details:
+- Blocking: exact match on normalised state.
+- Company similarity: rapidfuzz token_sort_ratio >= 82.
+  token_sort_ratio is order-invariant, so "acme steel" and "steel acme"
+  score 100.
+- City gate: exact normalised city match accepted; otherwise
+  rapidfuzz ratio >= 85 required.
+- In hybrid mode, fuzzy matching runs on ALL RC cases (not just
+  those without an exact match). Pairs already found by the exact
+  pass are then deduplicated, so fuzzy matches are strictly additive:
+  they contribute new RC–CA pairs only. This ensures that an RC case
+  with one exact CA match can still pick up additional CA matches
+  that only surface through fuzzy similarity.
+- The fuzzy_score column records the company-name similarity score
+  (100.0 for exact matches).
+- Preprocessed names and normalised locations are stored separately
+  for each side: match_company_r / match_company_c,
+  match_city_r / match_city_c, match_state_r / match_state_c.
+  For exact matches these pairs are identical; for fuzzy matches
+  they show exactly what was compared.
