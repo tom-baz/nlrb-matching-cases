@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.26">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>nlrb_evaluation_next_steps</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="NLRB_evaluation_next_steps_files/libs/clipboard/clipboard.min.js"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/popper.min.js"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="NLRB_evaluation_next_steps_files/libs/quarto-html/anchor.min.js"></script>
+<link href="NLRB_evaluation_next_steps_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="NLRB_evaluation_next_steps_files/libs/quarto-html/quarto-syntax-highlighting-587c61ba64f3a5504c4d52d930310e48.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="NLRB_evaluation_next_steps_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="NLRB_evaluation_next_steps_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="NLRB_evaluation_next_steps_files/libs/bootstrap/bootstrap-9e3ffae467580fdb927a41352e75a2e0.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="nlrb-entity-resolution-evaluation-plan-next-steps" class="level1">
+<h1>NLRB Entity Resolution — Evaluation Plan &amp; Next Steps</h1>
+<p><em>A practical roadmap for evaluating, comparing, and validating the fuzzy-matching and LLM-clustering pipelines used to resolve company names in NLRB R-Case / C-Case data.</em></p>
+<hr>
+<section id="background-the-conclusions-we-reached" class="level2">
+<h2 class="anchored" data-anchor-id="background-the-conclusions-we-reached">Background: the conclusions we reached</h2>
+<p>A few ideas frame everything below. They are the conclusions of the discussion, and every step serves one of them.</p>
+<p><strong>There are two different tasks, and they need two different evaluations.</strong></p>
+<ol type="1">
+<li><strong>The matching task</strong> — linking an R Case to a C Case (same firm, same place, overlapping time). This is a <em>bipartite record-linkage</em> problem. Your existing 250-pair blinded audit measures it.</li>
+<li><strong>The clustering task</strong> — resolving all ~334k company-name strings into firm-level entities. This is a <em>deduplication / clustering</em> problem, and it is the thing your IC2S2 abstract actually promises (“firm-level aggregation”).</li>
+</ol>
+<p>The matching task is a <strong>downstream application</strong> of the clustering and only a <em>biased keyhole</em> onto it: it only ever tests clusters that happen to contain both an R-side and a C-side name in the same city and time window. “The matching looks good” is necessary but <strong>not sufficient</strong> evidence that “the clustering is good enough to aggregate firms.”</p>
+<p><strong>Use the two name-matching methods together, not as rivals.</strong> Your own failure analysis shows they fail on <em>structurally different</em> populations — LLM clustering catches semantic equivalences (DBAs, abbreviations, parent/subsidiary, brand variants) but misses character-level typos in short, neighbor-less names; high-score fuzzy catches exactly those typos. The defensible operational policy is a <strong>tiered hybrid</strong>: clustering as the backbone, high-threshold fuzzy (<code>token_sort_ratio ≥ 90</code>) as an additive typo-recovery layer, with <strong>provenance flags</strong> on every accepted link so substantive results can be re-run on nested “core / core+fuzzy / full” samples.</p>
+<p><strong>Recall is intractable for the matching task but tractable for the clustering task.</strong> You cannot sample the ~100M non-matched R×C pairs to find missed links. But you <em>can</em> estimate clustering recall by sampling whole entities and reconstructing their true membership locally — which dissolves the recall problem for the question that matters for firm aggregation.</p>
+<p><strong>The LLM clustering lacks a confidence/agreement score (unlike the fuzzy score).</strong> You can manufacture one with <strong>consensus / stability</strong>: re-run the clustering several times with permuted record orderings and record how often each name pair lands together.</p>
+<p><strong>Frame the whole exercise as auditing a data-construction process, not benchmarking an algorithm.</strong> For an IC2S2 / sociology audience the contribution is not “our clustering scores <em>X</em> on a benchmark,” but “here is a principled audit of how reliably we turned messy NLRB names into firm entities, and what that reliability implies for firm-level inference.” That register also dictates the emphasis below: error <em>severity</em> and downstream distortion matter more than aggregate accuracy — which is why the next section comes before the steps.</p>
+<hr>
+</section>
+<section id="error-severity-why-over-merges-dominate-read-this-before-the-steps" class="level2">
+<h2 class="anchored" data-anchor-id="error-severity-why-over-merges-dominate-read-this-before-the-steps">Error severity: why over-merges dominate (read this before the steps)</h2>
+<p>Not all clustering errors cost the same, and for firm-level aggregation in NLRB research the asymmetry is large and one-directional. A <strong>catastrophic over-merge</strong> — two genuinely different firms bridged into one cluster or one canonical key — corrupts <em>every</em> downstream firm-level quantity (strike histories, ULP rates, union win rates, firm trajectories), because counts and rates get pooled across unrelated establishments. A <strong>missed typo alias</strong>, by contrast, leaves a firm slightly fragmented but rarely distorts an aggregate. The evaluation must be read through this asymmetry rather than treating all errors as interchangeable.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Error type</th>
+<th>Layer where it occurs</th>
+<th>Downstream damage</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Cross-company bridge merge (two real firms joined)</td>
+<td>clustering</td>
+<td><strong>Catastrophic</strong> — pools unrelated firms’ histories</td>
+</tr>
+<tr class="even">
+<td>Giant over-merge (many names wrongly fused)</td>
+<td>clustering</td>
+<td><strong>Catastrophic</strong> — damage scales with cluster size</td>
+</tr>
+<tr class="odd">
+<td>Representative collision (distinct firms share a canonical key)</td>
+<td>matching / aggregation</td>
+<td><strong>Catastrophic</strong> — silent firm-key contamination</td>
+</tr>
+<tr class="even">
+<td>Unresolved singleton (true variant left alone)</td>
+<td>blocker / clustering</td>
+<td>Moderate — under-counts a firm’s activity</td>
+</tr>
+<tr class="odd">
+<td>Over-split (one firm into a few subclusters)</td>
+<td>clustering</td>
+<td>Often tolerable — fragments, rarely pools wrongly</td>
+</tr>
+<tr class="even">
+<td>Missed typo alias</td>
+<td>blocker / fuzzy</td>
+<td>Small — minor fragmentation</td>
+</tr>
+</tbody>
+</table>
+<p>What this asymmetry justifies, and how to operationalize it:</p>
+<ul>
+<li>It justifies prioritizing <strong>precision / over-merge auditing</strong> (Step 3’s similarity tail and representative check; Step 4’s B-cubed precision) over chasing the last points of typo recall.</li>
+<li>It explains why <strong>pairwise precision alone is insufficient</strong>: a single bridge merge between two large clusters generates an enormous number of false pairs, so pairwise precision can crater on exactly the catastrophic case — read it together with B-cubed (record-centric) and with the <em>size</em> of the clusters involved.</li>
+<li>It clarifies the division of labor: the <strong>severe</strong> failures live on the precision side (over-merges), while <strong>blocker completeness</strong> governs the more-tolerable recall failures.</li>
+<li><strong>Operationalize it:</strong> weight every precision error by the size of the cluster it occurs in (or by the number of downstream R/C records that inherit the merged firm key), and report a <em>size-weighted</em> error rate alongside the unweighted one. Actively hunt for <strong>cross-company bridge merges</strong>: in the Step 4 sample and the Step 3 similarity tail, flag any cluster whose members split into two or more internally-coherent name groups with little cross-group similarity — that split pattern is the signature of a bridge.</li>
+</ul>
+<p>Use this as the lens for every metric below: where a choice trades recall for precision on large clusters, prefer precision.</p>
+<hr>
+</section>
+<section id="how-the-six-steps-fit-together" class="level2">
+<h2 class="anchored" data-anchor-id="how-the-six-steps-fit-together">How the six steps fit together</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 6%">
+<col style="width: 12%">
+<col style="width: 38%">
+<col style="width: 17%">
+<col style="width: 25%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>#</th>
+<th>Step</th>
+<th>Primarily checks</th>
+<th>Effort</th>
+<th>Depends on</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1</td>
+<td>Coverage accounting (name data-flow)</td>
+<td>Foundation for clustering claim</td>
+<td>½ day</td>
+<td>— (independent)</td>
+</tr>
+<tr class="even">
+<td>2</td>
+<td>Re-weight existing matching precision</td>
+<td>Matching (linkage)</td>
+<td>½ day</td>
+<td>Existing labeled sample</td>
+</tr>
+<tr class="odd">
+<td>3</td>
+<td>Label-free full-file diagnostics</td>
+<td>Clustering + blocker</td>
+<td>1–2 days</td>
+<td>Mostly independent (improves with Step 4)</td>
+</tr>
+<tr class="even">
+<td>4</td>
+<td>Entity-centric clustering benchmark</td>
+<td>Clustering</td>
+<td>1–2 weeks</td>
+<td>Step 1 (sampling frame)</td>
+</tr>
+<tr class="odd">
+<td>5</td>
+<td>Matching-recall estimation</td>
+<td>Matching (linkage)</td>
+<td>days</td>
+<td>Step 2 (corrected counts)</td>
+</tr>
+<tr class="even">
+<td>6</td>
+<td><em>(optional)</em> Consensus / stability confidence</td>
+<td>Clustering + comparison</td>
+<td>compute-heavy</td>
+<td>Independent (feeds 2, 4)</td>
+</tr>
+</tbody>
+</table>
+<p>Steps 1–3 are quick wins that upgrade the current draft. Step 4 is the main new labeling effort and the highest-value addition for the firm-aggregation claim. Step 5 addresses matching recall (with conditional recall as the primary figure). Step 6 is an <em>optional</em> extension that supplies the missing confidence score if the compute budget allows.</p>
+<hr>
+</section>
+<section id="step-1-coverage-accounting-the-name-data-flow" class="level2">
+<h2 class="anchored" data-anchor-id="step-1-coverage-accounting-the-name-data-flow">Step 1 — Coverage accounting (the name data-flow)</h2>
+<p><strong>Main idea &amp; motivation.</strong> Before any metric, produce a single transparent figure that tracks how many company names exist at each pipeline stage: raw strings → unique preprocessed names → names that entered blocking → names processed by the LLM → names emitted as singletons/fallbacks → names that never reached clustering at all. Your materials currently show several different totals (e.g.&nbsp;463,344 raw → 334,276 unique preprocessed → 224,767 in the evaluated cluster file across 91,120 clusters, with 38,892 singletons). Until these reconcile, any firm-aggregation claim looks shaky, because readers can’t tell how many firms were never even candidates for resolution.</p>
+<p><strong>Practical guidelines.</strong> Count at each stage from the source files and draw the flow as a diagram.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>ca <span class="op">=</span> pd.read_csv(<span class="st">"cluster_assignments_20260517.csv"</span>)</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"rows in cluster file        :"</span>, <span class="bu">len</span>(ca))</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"unique global clusters      :"</span>, ca[<span class="st">"global_cluster_id"</span>].nunique())</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"singleton clusters          :"</span>, (ca[<span class="st">"cluster_size"</span>] <span class="op">==</span> <span class="dv">1</span>).<span class="bu">sum</span>())</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"names in multi-name clusters:"</span>, (ca[<span class="st">"cluster_size"</span>] <span class="op">&gt;</span> <span class="dv">1</span>).<span class="bu">sum</span>())</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Reconcile against: raw string count, unique-preprocessed count,</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="co"># and the count of names that never entered blocking (absent from this file).</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<pre class="mermaid"><code>flowchart LR
+    A["Raw name strings\n(463,344)"] --&gt; B["Unique preprocessed\n(334,276)"]
+    B --&gt; C["Entered blocking"]
+    B --&gt; D["Never entered blocking\n(pre-blocking singletons)"]
+    C --&gt; E["Processed by LLM-CER"]
+    C --&gt; F["Block too large / capped"]
+    E --&gt; G["Multi-name clusters"]
+    E --&gt; H["Singleton clusters"]</code></pre>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Foundational for the <strong>clustering</strong> claim. It defines the universe over which any firm-level statistic is computed and exposes the population of names that can <em>never</em> be aggregated (pre-blocking singletons), which is a real limit on firm-level coverage in the NLRB panel.</p>
+<p><strong>Dependencies.</strong> Independent. Prerequisite for interpreting Steps 3–5 and for defining the Step 4 sampling frame.</p>
+<p><strong>Sources.</strong> Project materials (<code>clustering_results_table.md</code>, <code>clustering_failure_analysis.md</code>, IC2S2 abstract). General ER pipeline framing: Christen (2012); Papadakis et al.&nbsp;(2021).</p>
+<hr>
+</section>
+<section id="step-2-re-weight-the-existing-matching-precision" class="level2">
+<h2 class="anchored" data-anchor-id="step-2-re-weight-the-existing-matching-precision">Step 2 — Re-weight the existing matching precision</h2>
+<p><strong>Main idea &amp; motivation.</strong> You already have a clean, blinded, stratified precision audit of accepted R↔︎C links (250 pairs across <em>agreement</em>, <em>fuzzy-only</em>, <em>cluster-only</em> cells). But the three cells were sampled at very different rates relative to their true pool sizes, so you cannot simply average the per-cell numbers into an overall precision. Re-weight each cell by its real pool size to get an honest aggregate, and decide a rule for <code>unclear</code> labels (report best/worst-case).</p>
+<p><strong>Practical guidelines.</strong> Per-cell binomial precision with Wilson intervals is the right tool here (you sampled pairs roughly uniformly within cells) — keep what <code>analyze_evaluation_results.ipynb</code> already does, then add a pool-weighted aggregate.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Per-cell precision p_cell already computed (match / (match + no_match)).</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="co"># True pool sizes (accepted pairs in each cell), including the trivial</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="co"># identical-name agreement pool that the sample deliberately excluded:</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>pools <span class="op">=</span> {</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">"agreement_trivial"</span>:  <span class="dv">39_738</span>,   <span class="co"># identical preprocessed names -&gt; ~1.0 by construction</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    <span class="st">"agreement_nontrivial"</span>: <span class="dv">9_688</span>,</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="st">"fuzzy_only"</span>:           <span class="dv">1_046</span>,</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    <span class="st">"cluster_only"</span>:        <span class="dv">11_305</span>,</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>p_cell <span class="op">=</span> {<span class="st">"agreement_trivial"</span>: <span class="fl">1.00</span>, <span class="st">"agreement_nontrivial"</span>: <span class="fl">1.00</span>,</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>          <span class="st">"fuzzy_only"</span>: <span class="fl">0.959</span>, <span class="st">"cluster_only"</span>: <span class="fl">1.00</span>}</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> overall_precision(cells):</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>    num <span class="op">=</span> <span class="bu">sum</span>(pools[c] <span class="op">*</span> p_cell[c] <span class="cf">for</span> c <span class="kw">in</span> cells)</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    den <span class="op">=</span> <span class="bu">sum</span>(pools[c] <span class="cf">for</span> c <span class="kw">in</span> cells)</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num <span class="op">/</span> den</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a><span class="co"># A method's overall precision = weighted avg over the cells it participates in</span></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>fuzzy_cells   <span class="op">=</span> [<span class="st">"agreement_trivial"</span>, <span class="st">"agreement_nontrivial"</span>, <span class="st">"fuzzy_only"</span>]</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>cluster_cells <span class="op">=</span> [<span class="st">"agreement_trivial"</span>, <span class="st">"agreement_nontrivial"</span>, <span class="st">"cluster_only"</span>]</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Fuzzy overall precision  :"</span>, <span class="bu">round</span>(overall_precision(fuzzy_cells), <span class="dv">4</span>))</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Cluster overall precision:"</span>, <span class="bu">round</span>(overall_precision(cluster_cells), <span class="dv">4</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>For <code>unclear</code>: report the headline excluding unclears from the denominator, plus a sensitivity row treating all unclears first as <code>match</code> then as <code>no_match</code>.</p>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Evaluates <strong>matching (entity linkage)</strong> precision — the false-positive rate of the R↔︎C links you will actually analyze. Directly underwrites the validity of any establishment-level R↔︎C result in the paper.</p>
+<p><strong>Dependencies.</strong> Uses the existing labeled sample only; independent of Steps 1, 3–6.</p>
+<p><strong>Sources.</strong> Wilson interval: Wilson (1927); Brown, Cai &amp; DasGupta (2001). Avoiding trivial-positive inflation and metric-ranking caution: Hand &amp; Christen (2018); Menestrina et al.&nbsp;(2010).</p>
+<hr>
+</section>
+<section id="step-3-label-free-full-file-diagnostics" class="level2">
+<h2 class="anchored" data-anchor-id="step-3-label-free-full-file-diagnostics">Step 3 — Label-free, full-file diagnostics</h2>
+<p><strong>Main idea &amp; motivation.</strong> Cheap automated checks you can run over the <em>entire</em> cluster file with no new labels. They surface suspicious clusters for targeted review and — crucially — separate <strong>blocker</strong> failures from <strong>LLM</strong> failures. Your failure analysis already shows ~67% of cluster misses are upstream of the LLM (cross-block + pre-blocking singletons), so the most decision-relevant single number is <strong>blocker pair-completeness</strong>: of true same-firm name pairs, what fraction ever shared a block? If that ceiling is low, prompt tuning cannot fix recall.</p>
+<p><strong>Practical guidelines.</strong></p>
+<p><em>Blocker pair-completeness</em> (uses your existing labeled true-match pairs; even better once Step 4 labels exist):</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co"># For each adjudicated true same-firm pair (name_a, name_b),</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="co"># did they ever co-occur in a block?</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>blocks <span class="op">=</span> ca.groupby(<span class="st">"company_name"</span>)[<span class="st">"block_id"</span>].<span class="bu">apply</span>(<span class="bu">set</span>).to_dict()</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> shared_block(a, b):</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="bu">len</span>(blocks.get(a, <span class="bu">set</span>()) <span class="op">&amp;</span> blocks.get(b, <span class="bu">set</span>())) <span class="op">&gt;</span> <span class="dv">0</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>completeness <span class="op">=</span> <span class="bu">sum</span>(shared_block(a, b) <span class="cf">for</span> a, b <span class="kw">in</span> true_pairs) <span class="op">/</span> <span class="bu">len</span>(true_pairs)</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Blocker pair-completeness: </span><span class="sc">{</span>completeness<span class="sc">:.1%}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Within-cluster string-similarity tail</em> (over-merge suspects):</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> rapidfuzz <span class="im">import</span> fuzz</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> itertools <span class="im">import</span> combinations</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> min_internal_sim(names):</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="bu">len</span>(names) <span class="op">&lt;</span> <span class="dv">2</span>: <span class="cf">return</span> <span class="fl">1.0</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="bu">min</span>(fuzz.token_sort_ratio(a, b) <span class="cf">for</span> a, b <span class="kw">in</span> combinations(names, <span class="dv">2</span>))</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>multi <span class="op">=</span> ca[ca.cluster_size <span class="op">&gt;</span> <span class="dv">1</span>].groupby(<span class="st">"global_cluster_id"</span>)[<span class="st">"company_name"</span>].<span class="bu">apply</span>(<span class="bu">list</span>)</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>sims <span class="op">=</span> multi.<span class="bu">apply</span>(min_internal_sim).sort_values()   <span class="co"># hand-review the low tail</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Singleton audit</em> (recall leak, modes B/C): sample singletons, fuzzy-match <code>≥ 95</code> against the rest of the file, and check whether each has an obvious twin that was wrongly left unmerged.</p>
+<p><em>Representative collision — <strong>flag as a critical structural risk</strong>, not a routine check (see the severity table).</em> The cluster-matching pipeline substitutes the <strong>shortest</strong> name in each cluster as its canonical key. Short names are the most generic and collision-prone (“ABC Inc.”), so this policy systematically selects the worst possible representative. The damage is precise about <em>where</em> it bites: a collision does <strong>not</strong> re-cluster the file — the two clusters stay distinct in <code>cluster_assignments</code> — but because <code>match_r_to_c_cases.py</code> matches on the substituted representative, two different firms whose clusters share a representative string get <strong>silently linked downstream</strong>, and any firm-level aggregation keyed on the representative pools them. <em>Audit:</em> flag every representative shared across clusters with very different member sets. <em>Fix:</em> replace shortest-name with <strong>most-frequent</strong> or <strong>longest non-abbreviated</strong> name, and enforce representative uniqueness (split or disambiguate on collision). This is distinct from an LLM semantic-bridge over-merge (caught by the similarity tail above); both are catastrophic per the severity table, but they occur at different layers — clustering vs.&nbsp;aggregation — and need different fixes.</p>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Evaluates the <strong>clustering</strong> (over-merging via the similarity tail; under-merging / recall ceiling via blocker completeness and the singleton audit) plus the <strong>aggregation-layer</strong> representative-collision risk. Tells you <em>where to invest</em> (blocker vs.&nbsp;prompt vs.&nbsp;fuzzy bolt-on vs.&nbsp;representative policy) — the most actionable diagnostic for making the firm key trustworthy.</p>
+<p><strong>Dependencies.</strong> Mostly independent. Blocker pair-completeness uses existing labeled positives now and improves once Step 4 produces a larger labeled set.</p>
+<p><strong>Sources.</strong> Blocking / pair-completeness: Papadakis et al.&nbsp;(2020); Christen (2012). Error-degree / structural over-merge detection: Nanayakkara, Christen &amp; Christen (2025). Internal indices (silhouette etc.) are <strong>secondary debugging only</strong>, not headline evidence.</p>
+<hr>
+</section>
+<section id="step-4-entity-centric-clustering-benchmark-the-main-clustering-validation" class="level2">
+<h2 class="anchored" data-anchor-id="step-4-entity-centric-clustering-benchmark-the-main-clustering-validation">Step 4 — Entity-centric clustering benchmark <em>(the main clustering validation)</em></h2>
+<p><strong>Main idea &amp; motivation.</strong> This is the principled way to get <strong>precision and recall (and F1) for the clustering itself</strong>, with confidence intervals, when there are hundreds of thousands of names and you cannot sample non-matches. The key move (Binette et al.) is to <strong>sample whole entities, not pairs</strong>: draw a probability sample of names, reconstruct each one’s <em>true firm</em> by hand, and use design-based estimators. This is exactly the PatentsView inventor-disambiguation setup, applied to your firm names.</p>
+<p><strong>Practical guidelines.</strong></p>
+<ol type="1">
+<li><strong>Sample names uniformly at random from the <em>full</em> preprocessed name space</strong> — including the pre-blocking singletons absent from the cluster file. Uniform name sampling = sampling clusters with probability <strong>proportional to size</strong>, which is the efficient design <em>and</em> the mitigation for heavy-tailed cluster sizes (a few huge firms, a long singleton tail). Target <strong>~400–500 names</strong> (tight intervals at this size per Binette’s simulation).</li>
+<li><strong>Reconstruct the true firm for each sampled name (blinded).</strong> Start from the predicted cluster, <strong>remove</strong> wrongly included names (→ precision side), then <strong>search the entire name universe</strong> — across blocks and the dropped-singleton pool — for variants that <em>should</em> be included (→ recall side). <em>Confining the search to the name’s own block would bake the blocker’s failures into your ground truth and overstate recall by exactly the 67% upstream-miss share.</em></li>
+<li><strong>Estimate metrics with design-based estimators.</strong> Pairwise precision via <code>P_cluster_block</code>, pairwise recall via <code>R_record</code> (which coincides with <code>R_cluster_block</code> under proportional-to-size sampling), each with the first-order <strong>bias adjustment</strong> and <strong>Taylor-approximation confidence intervals</strong>. The <em>same</em> sample also yields <strong>B-cubed</strong> precision/recall and <strong>cluster-level</strong> metrics — these are additional ratio estimators off one labeled sample, not a second study. Report pairwise <em>and</em> B-cubed (they can rank methods differently; B-cubed exposes over-merging that pairwise can mask).</li>
+</ol>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Illustrative — confirm exact API at er-evaluation.readthedocs.io</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> er_evaluation <span class="im">import</span> (pairwise_precision_estimator,</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>                           pairwise_recall_estimator,</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>                           b_cubed_precision_estimator,</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>                           b_cubed_recall_estimator)</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="co"># prediction: a "membership" series  name -&gt; predicted cluster id</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>prediction <span class="op">=</span> pd.read_csv(<span class="st">"cluster_assignments_20260517.csv"</span>) <span class="op">\</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>               .set_index(<span class="st">"company_name"</span>)[<span class="st">"global_cluster_id"</span>]</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a><span class="co"># reference: the hand-resolved TRUE clusters for the sampled names</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a><span class="co">#   name -&gt; true firm id   (built from the blinded labeling sheet)</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>reference <span class="op">=</span> pd.read_csv(<span class="st">"clustering_benchmark_labels.csv"</span>) <span class="op">\</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>              .set_index(<span class="st">"company_name"</span>)[<span class="st">"true_firm_id"</span>]</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a><span class="co"># sampling weights handled by the package for proportional-to-size design</span></span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>P, P_se <span class="op">=</span> pairwise_precision_estimator(prediction, reference)</span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>R, R_se <span class="op">=</span> pairwise_recall_estimator(prediction, reference)</span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"pairwise precision </span><span class="sc">{</span>P<span class="sc">:.3f}</span><span class="ss"> ± </span><span class="sc">{</span><span class="fl">1.96</span><span class="op">*</span>P_se<span class="sc">:.3f}</span><span class="ss">"</span>)</span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"pairwise recall    </span><span class="sc">{</span>R<span class="sc">:.3f}</span><span class="ss"> ± </span><span class="sc">{</span><span class="fl">1.96</span><span class="op">*</span>R_se<span class="sc">:.3f}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Evaluates the <strong>clustering</strong> directly and is the single most defensible thing you can add for the firm-aggregation claim. “We follow Binette et al.’s entity-centric estimation framework” is a clean methods sentence and gives reviewers whole-dataset performance with quantified uncertainty.</p>
+<p><strong>Dependencies.</strong> Depends conceptually on <strong>Step 1</strong> (the sampling frame must be the full name space, including dropped singletons). Otherwise self-contained. Reuses your blinded-labeling workflow.</p>
+<p><strong>Sources.</strong> Binette et al.&nbsp;(2023, <em>The American Statistician</em>) — cluster/block estimators for precision <em>and</em> recall on huge name datasets; Binette et al.&nbsp;(2024, arXiv:2404.05622) — entity-centric framework (pairwise / B-cubed / cluster metrics, root-cause analysis); <code>ER-Evaluation</code> Python package; B-cubed: Bagga &amp; Baldwin (1998), Amigó et al.&nbsp;(2009); pairwise vs.&nbsp;cluster F1 / GMD: Menestrina et al.&nbsp;(2010).</p>
+<hr>
+</section>
+<section id="step-5-matching-recall-estimation" class="level2">
+<h2 class="anchored" data-anchor-id="step-5-matching-recall-estimation">Step 5 — Matching-recall estimation</h2>
+<p><strong>Main idea &amp; motivation.</strong> Global recall of the R↔︎C linkage is not estimable (you can’t enumerate all true links), and you should not claim it. The honest <em>primary</em> target is <strong>conditional recall within a reviewable plausible-candidate pool</strong>. A <strong>capture–recapture</strong> calculation — using your two methods as two imperfect detectors of the same truth — can be reported alongside it, but only as a <strong>heuristic upper-bound triangulation</strong>, never as an estimate of true recall: the two methods are positively dependent (both succeed on “easy” near-identical names, both lean indirectly on lexical similarity), which shrinks the overlap-based denominator and <strong>overstates</strong> recall. Foreground the conditional-recall audit; use capture–recapture only to bracket it from above.</p>
+<p><strong>Practical guidelines.</strong></p>
+<p><em>Conditional-recall audit (primary).</em> Define a reviewable plausible-candidate pool — same state, fuzzy-same city, overlapping window, plus lexical or block proximity — and draw a <strong>biased</strong> sample from pairs in that pool that <em>neither</em> method linked, oversampling likely-miss regions (near-threshold fuzzy pairs, top embedding neighbors that landed in different blocks, fallback / non-clustered names). Hand-label, then estimate recall with <strong>design weights</strong> that account for the biased sampling (the PatentsView sampling-bias estimators apply directly). This denominator is reviewable and substantively relevant to establishment linkage, and it is the recall figure you should foreground. Do <strong>not</strong> claim a true overall recall for the whole NLRB universe.</p>
+<p><em>Capture–recapture (heuristic upper bound only — report as triangulation, not as an estimate).</em> Using the two methods as two detectors, with <strong>precision-corrected</strong> match counts:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># True matches found by each method, on the NON-TRIVIAL subset</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>a <span class="op">=</span> <span class="dv">9_688</span> <span class="op">*</span> <span class="fl">1.00</span>        <span class="co"># agreement (non-trivial), both methods</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>b <span class="op">=</span> <span class="dv">1_046</span> <span class="op">*</span> <span class="fl">0.959</span>       <span class="co"># fuzzy-only true matches</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>c <span class="op">=</span> <span class="dv">11_305</span> <span class="op">*</span> <span class="fl">1.00</span>       <span class="co"># cluster-only true matches</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>n_fuzzy, n_cluster <span class="op">=</span> a <span class="op">+</span> b, a <span class="op">+</span> c</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>N_hat <span class="op">=</span> n_fuzzy <span class="op">*</span> n_cluster <span class="op">/</span> a               <span class="co"># Lincoln–Petersen</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"recall fuzzy   :"</span>, <span class="bu">round</span>(n_fuzzy <span class="op">/</span> N_hat, <span class="dv">3</span>))</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"recall cluster :"</span>, <span class="bu">round</span>(n_cluster <span class="op">/</span> N_hat, <span class="dv">3</span>))</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"recall union   :"</span>, <span class="bu">round</span>((a <span class="op">+</span> b <span class="op">+</span> c) <span class="op">/</span> N_hat, <span class="dv">3</span>))</span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Bootstrap over the labeled sample for CIs; ALSO report Chao's lower bound —</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a><span class="co"># the gap between the two brackets the positive-dependence bias.</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Why this is only a bound:</em> the two methods are positively dependent — both succeed on near-identical names and both lean indirectly on lexical similarity — so Lincoln–Petersen <strong>overstates</strong> recall. Present it as exploratory, give Lincoln–Petersen and Chao as an upper/lower bracket rather than a point estimate, and verify candidate-generation independence in <code>match_r_to_c_cases.py</code> before citing it. Its one genuine merit: because your methods fail on <em>structurally different</em> populations (semantic vs.&nbsp;character-level), they are <em>less</em> positively dependent than two variants of one method — so the bracket is informative, not noise, as long as it stays clearly subordinate to the conditional-recall audit.</p>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Evaluates <strong>matching (entity linkage)</strong> recall — conditional recall as the primary, reviewable figure, with capture–recapture as an upper bracket. Completes the F1 story for the method comparison and quantifies how many establishment links each method (and the hybrid) recovers, directly relevant to coverage of the R↔︎C analysis sample.</p>
+<p><strong>Dependencies.</strong> The conditional-recall audit is a small new labeling effort, otherwise independent. The (subordinate) capture–recapture calculation depends on <strong>Step 2</strong> for precision-corrected counts.</p>
+<p><strong>Sources.</strong> Capture–recapture / multiple-systems estimation: Lincoln–Petersen; Chao (1987). Sampling-bias-aware estimators: Binette et al.&nbsp;(2023, PatentsView). Active/biased sampling alternative: Marchant &amp; Rubinstein (2017, OASIS). Realistic open-world ER caution: Wang et al.&nbsp;(2022).</p>
+<hr>
+</section>
+<section id="step-6-optional-consensus-stability-confidence-the-missing-agreement-score" class="level2">
+<h2 class="anchored" data-anchor-id="step-6-optional-consensus-stability-confidence-the-missing-agreement-score">Step 6 (optional) — Consensus / stability confidence (the missing agreement score)</h2>
+<p><strong>Main idea &amp; motivation.</strong> <em>(Optional extension — valuable but the most operationally expensive step; treat it as a confidence diagnostic, not a second accuracy estimate, and skip or cheapen it if compute is tight.)</em> Fuzzy hands you a <code>token_sort_ratio</code>; the LLM hands you a hard 0/1. Manufacture a graded confidence with the standard unsupervised-clustering device of <strong>consensus / stability</strong>: re-run the clustering several times varying only the record-set ordering and/or k-means seed, and for each name pair record the <strong>fraction of runs in which the two names co-cluster</strong>. That co-clustering frequency ∈ [0,1] is a per-edge confidence. Crucially, the run-to-run <em>instability</em> is <strong>not noise to suppress — it is the signal</strong>: a pair that co-clusters in 4 of 10 runs genuinely is a fragile, low-confidence merge, and that is exactly the agreement score you lack. This is well-motivated here because the source method (Fu et al.) shows that set size, diversity, and <strong>ordering</strong> materially change in-context clustering output.</p>
+<p><strong>Practical guidelines.</strong></p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Re-run NRS/CMR on a SAMPLE of blocks, K times, varying order/seed.</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> collections <span class="im">import</span> Counter</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>co <span class="op">=</span> Counter()                      <span class="co"># (name_a, name_b) -&gt; times co-clustered</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> k <span class="kw">in</span> <span class="bu">range</span>(K):                  <span class="co"># e.g. K = 10</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    clusters_k <span class="op">=</span> run_llm_clustering(blocks_sample, seed<span class="op">=</span>k, shuffle<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> cluster <span class="kw">in</span> clusters_k:</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> a, b <span class="kw">in</span> combinations(<span class="bu">sorted</span>(cluster), <span class="dv">2</span>):</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>            co[(a, b)] <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>confidence <span class="op">=</span> {pair: n <span class="op">/</span> K <span class="cf">for</span> pair, n <span class="kw">in</span> co.items()}   <span class="co"># per-edge score in [0,1]</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<ul>
+<li>Cost control: re-run only on a <em>sample of blocks</em>, enough to characterize the confidence distribution and to attach confidence to your evaluation-sample pairs.</li>
+<li><strong>Cheaper variants (use if full reruns are too costly):</strong> re-run only the <strong>CMR / merge stage</strong> rather than the whole NRS+LLM pipeline on sampled blocks; vary <strong>only the ordering</strong> on a small block sample; or skip reruns entirely and use a <strong>static proxy</strong> for confidence — within-cluster embedding dispersion, or the <strong>kNN-verification margin</strong> already produced in the CMR step. These give a usable confidence gradient at a fraction of the API cost.</li>
+<li>Summarize each cluster by mean internal consensus (Hennig’s cluster-wise Jaccard stability) to flag fragile clusters for review.</li>
+<li>Prefer consensus over the LLM’s self-reported confidence, which is poorly calibrated.</li>
+</ul>
+<p><strong>What it evaluates &amp; NLRB contribution.</strong> Provides the <strong>clustering</strong> with a confidence score, lets you draw a precision–coverage curve for clustering analogous to a fuzzy-threshold sweep (so the two methods compare on the <strong>same axes</strong>), and defines a high-confidence clustering tier for the hybrid policy. Underwrites the robustness analyses (re-running substantive NLRB results on conservative vs.&nbsp;expansive linkage tiers).</p>
+<p><strong>Dependencies.</strong> Independent to execute (re-runs the pipeline). Its output feeds back into the comparison (Steps 2, 5) and into prioritizing review in Steps 3–4.</p>
+<p><strong>Sources.</strong> In-context clustering ordering effects: Fu et al.&nbsp;(2025, LLM-CER). Consensus clustering: Monti et al.&nbsp;(2003). Cluster-wise stability: Hennig (2007). Stability overview: von Luxburg (2010). LLM confidence calibration concerns: general calibration literature.</p>
+<hr>
+</section>
+<section id="important-articles" class="level2">
+<h2 class="anchored" data-anchor-id="important-articles">Important articles</h2>
+<p><strong>Core methodology (entity-centric, sampling-based evaluation)</strong> - Binette, O., York, S. A., Hickerson, E., Baek, Y., Madhavan, S., &amp; Jones, C. (2023). <em>Estimating the Performance of Entity Resolution Algorithms: Lessons Learned Through PatentsView.org.</em> <strong>The American Statistician</strong>, 77(4), 370–380. doi:10.1080/00031305.2023.2191664. — Cluster/block estimators (<code>P_cluster_block</code>, <code>R_record</code>) for precision <em>and</em> recall on huge name datasets; the closest published analog to this project. - Binette, O., et al.&nbsp;(2024). <em>How to Evaluate Entity Resolution Systems: An Entity-Centric Framework with Application to Inventor Name Disambiguation.</em> arXiv:2404.05622. — Sample-clusters-not-pairs benchmark; pairwise / B-cubed / cluster metrics; root-cause error analysis. The direct successor methodology. - <code>ER-Evaluation</code> Python package — github.com/OlivierBinette/er-evaluation; docs at er-evaluation.readthedocs.io. — Ready implementation with uncertainty quantification.</p>
+<p><strong>Source clustering method</strong> - Fu, J., Tang, H., Khan, A., Mehrotra, S., Ke, X., &amp; Gao, Y. (2025). <em>In-context Clustering-based Entity Resolution with Large Language Models: A Design Space Exploration.</em> arXiv:2506.02509. — The LLM-CER method used in this project; documents ordering / set-size effects (basis for the consensus-confidence idea). <em>(Verify exact venue/ID.)</em></p>
+<p><strong>Label-free / unsupervised evaluation</strong> - Nanayakkara, C., Christen, P., &amp; Christen, V. (2025). <em>Unsupervised Evaluation of Entity Resolution.</em> <strong>ACM J. Data and Information Quality</strong>, 17(1), Art. 5. — Estimating precision/recall of an ER clustering with no ground truth, from the similarity graph; useful as a cheap cross-check (but assumes a meaningful pairwise similarity, which penalizes exactly the LLM’s semantic merges — secondary only).</p>
+<p><strong>Metrics</strong> - Bagga, A., &amp; Baldwin, B. (1998). <em>Algorithms for Scoring Coreference Chains.</em> (B-cubed.) - Amigó, E., Gonzalo, J., Artiles, J., &amp; Verdejo, F. (2009). <em>A comparison of extrinsic clustering evaluation metrics based on formal constraints.</em> <strong>Information Retrieval</strong>, 12. (Formal properties of B-cubed.) - Menestrina, D., Whang, S. E., &amp; Garcia-Molina, H. (2010). <em>Evaluating Entity Resolution Results.</em> <strong>PVLDB</strong>, 3. (Pairwise F1, cluster F1, Generalized Merge Distance; metrics can rank methods differently.) - Hand, D. J., &amp; Christen, P. (2018). <em>A note on using the F-measure for evaluating record linkage algorithms.</em> <strong>Statistics and Computing</strong>, 28.</p>
+<p><strong>Recall without enumerating non-matches</strong> - Marchant, N. G., &amp; Rubinstein, B. I. P. (2017). <em>In Search of an Entity Resolution OASIS: Optimal Asymptotic Sequential Importance Sampling.</em> <strong>PVLDB</strong>, 10 / arXiv:1703.00617. (Biased/active pairwise sampling; needs a per-pair score.) - Chao, A. (1987). <em>Estimating the population size for capture–recapture data with unequal catchability.</em> <strong>Biometrics</strong>. (Heterogeneity-robust lower bound for dual-system estimation.)</p>
+<p><strong>Model-based linkage (for context — not directly applicable to a black-box clusterer)</strong> - Enamorado, T., Fifield, B., &amp; Imai, K. (2019). <em>Using a Probabilistic Model to Assist Merging of Large-Scale Administrative Records.</em> <strong>APSR</strong>, 113. (<code>fastLink</code>; self-estimated error rates from a Fellegi–Sunter model.)</p>
+<p><strong>Stability / consensus</strong> - Monti, S., et al.&nbsp;(2003). <em>Consensus Clustering.</em> <strong>Machine Learning</strong>, 52. - Hennig, C. (2007). <em>Cluster-wise assessment of cluster stability.</em> <strong>Computational Statistics &amp; Data Analysis</strong>, 52. - von Luxburg, U. (2010). <em>Clustering stability: an overview.</em> <strong>Foundations and Trends in Machine Learning</strong>, 2.</p>
+<p><strong>Background / surveys</strong> - Christen, P. (2012). <em>Data Matching.</em> Springer. - Papadakis, G., et al.&nbsp;(2020). <em>Blocking and Filtering Techniques for Entity Resolution: A Survey.</em> <strong>ACM Computing Surveys</strong>, 53. - Papadakis, G., Ioannou, E., Thanos, E., &amp; Palpanas, T. (2021). <em>The Four Generations of Entity Resolution.</em> Morgan &amp; Claypool. - Wang, T., et al.&nbsp;(2022). <em>Bridging the Gap between Reality and Ideality of Entity Matching.</em> arXiv:2205.05889. - Wilson, E. B. (1927); Brown, Cai &amp; DasGupta (2001). — Binomial confidence intervals.</p>
+<hr>
+<p><em>Note on scope:</em> Steps 2 and 5 evaluate the <strong>R↔︎C matching (entity linkage)</strong> task; Steps 1, 3, 4, and 6 evaluate the <strong>name→firm clustering</strong> task. The headline paper claim they jointly support: <em>LLM clustering substantially expands non-trivial firm resolution at high precision and yields a reusable, transitive firm key; the best operational linkage uses clustering as the backbone with high-threshold fuzzy as a typo-recovery layer</em> — with precision estimated directly, conditional recall estimated within a reviewable candidate space, blocker coverage audited separately, and substantive results shown robust across linkage tiers.</p>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

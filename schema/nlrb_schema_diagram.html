@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NLRB Tables Schema</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #2c5282;
+        }
+        h2 {
+            color: #2c5282;
+            border-bottom: 2px solid #2a6fdb;
+            padding-bottom: 8px;
+            margin-top: 30px;
+        }
+        .diagram-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .info-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        ul {
+            line-height: 1.8;
+        }
+        li strong {
+            color: #2c5282;
+        }
+        code {
+            background-color: #e2e8f0;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>NLRB Tables Schema</h1>
+    <p style="text-align: center; color: #666;">Database schema for NLRB R Cases and C Cases, consolidated from three filing systems: NxGen, CATS, and CHIPS.</p>
+    
+    <div class="diagram-container">
+        <h2>Entity Relationship Diagram</h2>
+        <div class="mermaid">
+erDiagram
+    R_CASES ||--o{ ELECTIONS : ""
+    R_CASES ||--|| R_CASES_ADDRESS : ""
+    C_CASES ||--|| C_CASES_ADDRESS : ""
+    R_CASES ||--o{ RC_AC_MATCHES : ""
+    C_CASES ||--o{ RC_AC_MATCHES : ""
+
+    R_CASES {
+        string r_case_number
+        string type
+        date date_filed
+        date date_closed
+        string filing_system
+    }
+
+    R_CASES_ADDRESS {
+        string r_case_number
+        string company_name
+        string state
+        string city
+        string zip_code
+        string filing_system
+    }
+
+    ELECTIONS {
+        string r_case_number
+        string unit
+        date election_date
+        string election_result
+        string union_won
+        float pct_votes_for
+        float union_representation
+        string filing_system
+    }
+
+    C_CASES {
+        string c_case_number
+        string type
+        date date_filed
+        string allegations
+        string merit
+        string filing_system
+    }
+
+    C_CASES_ADDRESS {
+        string c_case_number
+        string company_name
+        string state
+        string city
+        string zip_code
+        string filing_system
+    }
+
+    RC_AC_MATCHES {
+        string r_case_number
+        string c_case_number
+        date r_date_filed
+        date r_date_closed
+        date c_date_filed
+        string r_company_name
+        string r_state
+        string r_city
+        string c_company_name
+        string c_state
+        string c_city
+        string match_company_r
+        string match_company_c
+        string match_state_r
+        string match_state_c
+        string match_city_r
+        string match_city_c
+        string match_method
+        float fuzzy_score
+    }
+        </div>
+    </div>
+
+    <div class="info-container">
+        <h2>Relationships</h2>
+        <ul>
+            <li><strong>R_CASES to ELECTIONS:</strong> One-to-many (one R case can have multiple elections in different units)</li>
+            <li><strong>R_CASES to R_CASES_ADDRESS:</strong> One-to-one (each R case has one address record)</li>
+            <li><strong>C_CASES to C_CASES_ADDRESS:</strong> One-to-one (each C case has one address record)</li>
+            <li><strong>R_CASES to RC_AC_MATCHES:</strong> One-to-many (each RC petition may match zero or more CA charges)</li>
+            <li><strong>C_CASES to RC_AC_MATCHES:</strong> One-to-many (each CA charge may match zero or more RC petitions)</li>
+        </ul>
+
+        <h2>Key Fields</h2>
+        <ul>
+            <li>R-related tables are linked via the <code>r_case_number</code> field</li>
+            <li>C-related tables are linked via the <code>c_case_number</code> field</li>
+            <li><code>RC_AC_MATCHES</code> is a bridge table resolving the many-to-many link between RC petitions and CA charges filed during the petition's active window at the same establishment</li>
+        </ul>
+
+        <h2>How the Matching Works</h2>
+        <p>The goal is to link each union election petition (<strong>R Case</strong>) to the unfair-labor-practice charges (<strong>C Cases</strong>) that involve the <strong>same workplace at the same time</strong>. The script builds the final <code>RC_AC_MATCHES</code> table in three steps:</p>
+        <ol>
+            <li><strong>Pair up candidates (merge).</strong> Bring together R Cases and C Cases that share the same <strong>company name</strong>, <strong>state</strong>, and <strong>NLRB region</strong>. This creates a list of possible matches.</li>
+            <li><strong>Keep only the same place (filter).</strong> From those candidates, keep the pairs whose <strong>city</strong> also matches.</li>
+            <li><strong>Keep only the same time (filter).</strong> Keep the pairs where the charge (C Case) was filed <strong>while the petition (R Case) was active</strong> &mdash; that is, between the petition's filing date and its closing date.</li>
+        </ol>
+        <p>What remains is the <strong>final matches table</strong>: one row per linked R Case&ndash;C Case pair, recording both cases and how they were matched.</p>
+
+        <h2>Handling Inconsistent Spelling</h2>
+        <p>The same workplace is often written differently across the data &mdash; abbreviations, punctuation, spacing, and spelling vary from one record to the next. If we required text to match <em>exactly</em>, we would miss many true matches. To avoid this, both <strong>company names</strong> and <strong>city names</strong> are compared using <strong>fuzzy matching</strong>, which measures how <em>similar</em> two pieces of text are and accepts them as the same when they are close enough.</p>
+        <ul>
+            <li><strong>Company names.</strong> Names are compared in two ways. An <em>exact</em> comparison catches names that are identical after a standardized cleanup. A <em>fuzzy</em> comparison then catches names that are highly similar but not identical &mdash; for example, &ldquo;Acme Steel Corp&rdquo; vs. &ldquo;Acme Steel Co&rdquo;, or the same words in a different order. Only pairs whose similarity is above a set level are kept. The <code>match_method</code> column records whether each pair was linked by the exact or the fuzzy comparison.</li>
+            <li><strong>City names.</strong> The city check (step 2) works the same way: a pair is kept if the two cities are identical <em>or</em> close enough &mdash; for example, &ldquo;St. Louis&rdquo; vs. &ldquo;Saint Louis&rdquo;. This allows minor variations through while still rejecting genuinely different cities.</li>
+        </ul>
+
+        <h2>RC_AC_MATCHES Table Notes</h2>
+        <p>The matching table is produced by <code>match_r_to_c_cases.py</code>, which can identify the same company in two ways (controlled by <code>--company-column</code>) and writes the same schema in both:</p>
+        <ul>
+            <li><strong>Fuzzy matching</strong> (default): the name-based process described above &mdash; exact and fuzzy comparison of company names. Writes to <code>rc_ac_matches.parquet</code> / <code>rc_ac_matches.csv</code>.</li>
+            <li><strong>Cluster-based matching</strong> (<code>--company-column cluster_representative</code>): name variants are grouped into the same company in advance (via LLM-based clustering), so the matching itself only needs an exact comparison. Writes to <code>rc_ac_cluster_matches_20260517.parquet</code> / <code>.csv</code> (the date suffix matches the <code>cluster_assignments_20260517.csv</code> file consumed).</li>
+        </ul>
+        <p>Column notes:</p>
+        <ul>
+            <li><code>r_*</code> / <code>c_*</code> columns carry the original company and location values from each side.</li>
+            <li><code>match_company_*</code>, <code>match_state_*</code>, <code>match_city_*</code> are the cleaned-up (standardized) forms that were actually compared.</li>
+            <li><code>match_method</code> indicates how the pair was linked: <code>exact</code> or <code>fuzzy</code>. (In cluster-based runs, all matches are <code>exact</code> because the clustering does the name-grouping work upstream.)</li>
+            <li><code>fuzzy_score</code> is the company-name similarity score (<code>rapidfuzz.token_sort_ratio</code>) for fuzzy pairs; <code>100.0</code> for exact matches.</li>
+        </ul>
+    </div>
+
+    <script>
+        mermaid.initialize({ 
+            startOnLoad: true,
+            theme: 'default',
+            themeVariables: {
+                primaryColor: '#2a6fdb',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#0f3f77',
+                lineColor: '#0f3f77',
+                secondaryColor: '#2a6fdb',
+                tertiaryColor: '#fff'
+            }
+        });
+    </script>
+</body>
+</html>

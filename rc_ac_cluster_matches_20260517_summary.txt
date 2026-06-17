@@ -5,18 +5,18 @@ MATCHING SUMMARY
 Match mode:  exact
 
 RC cases in dataset:          141,732
-RC cases with ≥1 CA match:     29,554  (20.9%)
+RC cases with ≥1 CA match:     29,157  (20.6%)
 
 CA cases in dataset:          754,030
-CA cases matched to ≥1 RC:     55,611  (7.4%)
+CA cases matched to ≥1 RC:     54,697  (7.3%)
 
-Total match pairs:             60,731
+Total match pairs:             59,412
 
 Match pairs by method:
-   exact:     60,731  (100.0%)
+   exact:     59,412  (100.0%)
 
 CA cases per matched RC case:
-  mean   = 2.05
+  mean   = 2.04
   median = 1.0
   max    = 272
   p90    = 4
@@ -26,7 +26,7 @@ RC cases per matched CA case:
   mean   = 1.09
   median = 1.0
   max    = 17
-  CA cases matched to >1 RC: 3,496 (6.3%)
+  CA cases matched to >1 RC: 3,242 (5.9%)
 
 ============================================================
 NOTES

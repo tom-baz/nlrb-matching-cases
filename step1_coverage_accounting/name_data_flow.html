@@ -1,0 +1,1592 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.26">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>name_data_flow</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="name_data_flow_files/libs/clipboard/clipboard.min.js"></script>
+<script src="name_data_flow_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="name_data_flow_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="name_data_flow_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="name_data_flow_files/libs/quarto-html/popper.min.js"></script>
+<script src="name_data_flow_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="name_data_flow_files/libs/quarto-html/anchor.min.js"></script>
+<link href="name_data_flow_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="name_data_flow_files/libs/quarto-html/quarto-syntax-highlighting-587c61ba64f3a5504c4d52d930310e48.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="name_data_flow_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="name_data_flow_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="name_data_flow_files/libs/bootstrap/bootstrap-9e3ffae467580fdb927a41352e75a2e0.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="company-name-data-flow-end-to-end" class="level1">
+<h1>Company-Name Data Flow — End-to-End</h1>
+<p><em>A stage-by-stage trace of how a company name moves from raw NLRB filings into the final R↔︎C match outputs. Built to underpin <strong>Step 1 — Coverage Accounting</strong> from <code>../NLRB_evaluation_next_steps.md</code>. Every count in this document is cited to its source file or script; numbers that disagree across docs are flagged in §6.</em></p>
+<hr>
+<section id="pipeline-at-a-glance" class="level2">
+<h2 class="anchored" data-anchor-id="pipeline-at-a-glance">0. Pipeline at a glance</h2>
+<pre><code>┌────────────────────────────────────────────────────────────────────────────┐
+│  raw CHIPS / CATS / NxGen tables                                          │
+│           │                                                                │
+│           ▼   nlrb-creating-files/                                         │
+│  per-system R/C/ADDRESS parquets ──► merge ──► union-flag                  │
+│           │                                                                │
+│           ▼                                                                │
+│  merged_R_CASES_ADDRESS_with_union_flag.parquet         (197,451 rows)     │
+│  merged_C_CASES_ADDRESS_with_union_flag.parquet       (1,038,762 rows)     │
+│  merged_R_CASES_final.parquet  /  merged_C_CASES_final.parquet            │
+└─────────────────────────┬──────────────────────────────────────────────────┘
+                          │
+        ┌─────────────────┴──────────────────────────┐
+        │                                            │
+        ▼                                            ▼
+  nlrb-blocking/                              nlrb-matching-cases/
+  preprocess → dedup → embed → kNN union      (same preprocessor, applied
+       │                                       per-row on each address table)
+       ▼
+  334,276 unique preprocessed names
+       │
+       │   FAISS-IP   +   char-ngram TF-IDF kNN   →   union of edges
+       │
+       ▼
+  blocks.csv (51,630 blocks, 224,767 names; ~109,509 pre-blocking singletons
+              are silently dropped — they have no row in blocks.csv)
+       │
+       ▼   nlrb-clustering-with-LLM/
+  hierarchical NRS → LLM → CMR  (block-by-block, S_S=12, MAX_BLOCK_SIZE=1000)
+       │
+       ▼
+  cluster_assignments_20260517.csv
+      224,767 rows · 91,120 global clusters · 38,892 LLM-decided singletons
+       │
+       ▼   nlrb-matching-cases/add_cluster_representatives.py
+  ADDRESS parquets gain a `cluster_representative` column
+  (cluster lookup hit-rate ≈ 224,767 / 334,276 of unique preprocessed names;
+   misses fall back to the preprocessed name itself)
+       │
+       ▼   nlrb-matching-cases/match_r_to_c_cases.py
+  RC × CA equi-join on (company-key, state) + city gate + date window
+       │
+       ▼
+  rc_ac_matches.parquet                   (hybrid fuzzy)   50,472 pairs
+  rc_ac_cluster_matches_20260517.parquet  (cluster exact)  60,731 pairs</code></pre>
+<p>The two address parquets are the <strong>only</strong> company-name inputs to the entity-resolution work; everything else (R_CASES_final, C_CASES_final, the elections table) supplies dates, case types, or downstream joins, never names. This is why the user-supplied summary calls them the “basic data files.”</p>
+<hr>
+</section>
+<section id="stage-1-nlrb-creating-files-raw-unified-parquets" class="level2">
+<h2 class="anchored" data-anchor-id="stage-1-nlrb-creating-files-raw-unified-parquets">1. Stage 1 — <code>nlrb-creating-files/</code> : raw → unified parquets</h2>
+<p><strong>Folder layout.</strong></p>
+<pre><code>nlrb-creating-files/
+├── CHIPS/        ── R_CASES_ADDRESS_CHIPS.ipynb, C_CASES_ADDRESS_CHIPS.ipynb, *_DATA/
+├── CATS/         ── R_CASES_ADDRESS_CATS.ipynb,  C_CASES_ADDRESS_CATS.ipynb,  *_DATA/
+├── NxGen/        ── R_CASES_ADDRESS_NxGen.ipynb, C_CASES_ADDRESS_NxGen.ipynb, *_DATA/
+├── Merge_files/  ── merge_R_CASES_ADDRESS.ipynb, merge_C_CASES_ADDRESS.ipynb,
+│                    flag_union_names_v2.ipynb, + merged_*.parquet outputs
+├── nlrb_schema_diagram.md / .html
+└── fmcs_schema_diagram.md / .html</code></pre>
+<section id="per-system-extracts" class="level3">
+<h3 class="anchored" data-anchor-id="per-system-extracts">1.1 Per-system extracts</h3>
+<p>Each filing system has parallel notebooks that read its raw tables and emit a per-system address parquet.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 15%">
+<col style="width: 15%">
+<col style="width: 15%">
+<col style="width: 15%">
+<col style="width: 15%">
+<col style="width: 21%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>System</th>
+<th>Raw source</th>
+<th>R-side notebook</th>
+<th>C-side notebook</th>
+<th>Output (address)</th>
+<th style="text-align: right;">Rows</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>CHIPS</strong> (1984–2001)</td>
+<td><code>chips_master_self_made.pkl</code> (114,606 R cases), <code>cases_names_chips.parquet</code> (654,975 rows), <code>cases_city_zip_chips.parquet</code></td>
+<td><code>CHIPS/R_CASES_ADDRESS_CHIPS.ipynb</code> (lines 507–531)</td>
+<td><code>CHIPS/C_CASES_ADDRESS_CHIPS.ipynb</code></td>
+<td><code>r_cases_address_chips.parquet</code> (115,171 rows, 99.5% non-null company_name) / <code>c_cases_address_chips.parquet</code> (509,002 rows, 99.4% non-null)</td>
+<td style="text-align: right;">—</td>
+</tr>
+<tr class="even">
+<td><strong>CATS</strong> (1999–2011)</td>
+<td>CATS raw extracts</td>
+<td><code>CATS/R_CASES_ADDRESS_CATS.ipynb</code></td>
+<td><code>CATS/C_CASES_ADDRESS_CATS.ipynb</code></td>
+<td><code>R_CASES_ADDRESS_CATS.parquet</code> (74,095 rows, 99.9% non-null) / <code>C_CASES_ADDRESS_CATS.parquet</code> (320,562 rows, 99.99% non-null)</td>
+<td style="text-align: right;">—</td>
+</tr>
+<tr class="odd">
+<td><strong>NxGen</strong> (2011–)</td>
+<td>NxGen <code>Case Name</code> field</td>
+<td><code>NxGen/R_CASES_ADDRESS_NxGen.ipynb</code></td>
+<td><code>NxGen/C_CASES_ADDRESS_NxGen.ipynb</code></td>
+<td><code>R_CASES_ADDRESS_NxGen.parquet</code> (35,445 rows, 100% non-null; adds <code>zip_reliability</code>, <code>data_notes</code>) / <code>C_CASES_ADDRESS_NxGen.parquet</code> (243,846 rows, 100% non-null)</td>
+<td style="text-align: right;">—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Per-system company-name column.</strong> Each notebook pulls the company name from the raw source verbatim — CHIPS <code>Employer</code>, CATS source-table column, NxGen <code>Case Name</code> — and writes it to a column called <code>company_name</code>. <strong>No lowercasing, stripping, or normalization is applied at this stage.</strong> The string is the raw record exactly as it sits in the source system. (Surprise on NxGen: 20.1% of zip codes flagged “potentially_hq” — for 3,308 cases the employer’s recorded state disagrees with the regional jurisdiction, because the recorded address is the HQ rather than the establishment. The <code>zip_reliability</code> column documents this but doesn’t alter the name.)</p>
+</section>
+<section id="merging-the-three-systems" class="level3">
+<h3 class="anchored" data-anchor-id="merging-the-three-systems">1.2 Merging the three systems</h3>
+<p><code>Merge_files/merge_R_CASES_ADDRESS.ipynb</code> and <code>merge_C_CASES_ADDRESS.ipynb</code> concatenate the three per-system address parquets (priority order <strong>NxGen &gt; CATS &gt; CHIPS</strong> when a <code>case_number</code> appears in more than one system), then: - Standardize <code>case_number</code> to <code>XX-YY-ZZZZZZ</code>. - Standardize <code>state</code> to 2-letter codes (CATS was largely full names). - Derive a <code>type</code> column (RC, RD, CA, CB, etc.) from the case number. - Drop duplicates by <code>case_number</code>, keeping the higher-priority source.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 20%">
+<col style="width: 26%">
+<col style="width: 26%">
+<col style="width: 26%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Address table</th>
+<th style="text-align: right;">Pre-dedup rows</th>
+<th style="text-align: right;">Post-dedup rows</th>
+<th style="text-align: right;">Drop count</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>R cases</td>
+<td style="text-align: right;">224,711</td>
+<td style="text-align: right;"><strong>197,451</strong></td>
+<td style="text-align: right;">27,260 (CHIPS 56.9%, CATS 25.2%, NxGen 18.0%)</td>
+</tr>
+<tr class="even">
+<td>C cases</td>
+<td style="text-align: right;">1,073,410</td>
+<td style="text-align: right;"><strong>1,038,762</strong></td>
+<td style="text-align: right;">34,648 (CHIPS 46.5%, CATS 30.0%, NxGen 23.5%)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Output columns at this point</strong>: <code>case_number, company_name, state, city, zip_code, data_source, type</code> — names still in their raw form.</p>
+</section>
+<section id="union-flag-pass" class="level3">
+<h3 class="anchored" data-anchor-id="union-flag-pass">1.3 Union-flag pass</h3>
+<p><code>Merge_files/flag_union_names_v2.ipynb</code> reads the merged address parquets and adds two columns: - <code>is_union_name</code> (bool) — fired by ~50 regex phrase patterns + 36 union acronyms (<code>local [number]</code> is the dominant trigger; about 40% of all flags). - <code>matched_union_terms</code> (list[str]) — which patterns hit. - Also added: <code>is_long_name</code> (&gt;100 chars or &gt;15 words) — used as a sanity filter later.</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Address table</th>
+<th style="text-align: right;"><code>is_union_name = True</code></th>
+<th style="text-align: right;"><code>is_long_name = True</code></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>R cases</td>
+<td style="text-align: right;">2,671 (1.35%)</td>
+<td style="text-align: right;">374 (0.19%)</td>
+</tr>
+<tr class="even">
+<td>C cases</td>
+<td style="text-align: right;">180,624 (17.39%)</td>
+<td style="text-align: right;">23,520 (2.26%)</td>
+</tr>
+</tbody>
+</table>
+<p>The flagger uses <strong>case-insensitive regex</strong> but <strong>does not modify the <code>company_name</code> string itself</strong> — it only adds the two flag columns. Row counts are unchanged.</p>
+<p><strong>Final outputs from this stage</strong> (used by every downstream stage): - <code>merged_R_CASES_ADDRESS_with_union_flag.parquet</code> — 197,451 rows - <code>merged_C_CASES_ADDRESS_with_union_flag.parquet</code> — 1,038,762 rows - <code>merged_R_CASES_final.parquet</code>, <code>merged_C_CASES_final.parquet</code> (case-level: type and dates only) - <code>merged_elections_final.parquet</code> (not used in matching)</p>
+<hr>
+</section>
+</section>
+<section id="stage-2-nlrb-blocking-address-parquets-blocks.csv" class="level2">
+<h2 class="anchored" data-anchor-id="stage-2-nlrb-blocking-address-parquets-blocks.csv">2. Stage 2 — <code>nlrb-blocking/</code> : ADDRESS parquets → <code>blocks.csv</code></h2>
+<p>This stage extracts unique preprocessed names from the two address parquets, builds two candidate-edge graphs (semantic embeddings + character n-grams), unions them, and assembles disjoint, size-capped blocks of similar names.</p>
+<p><strong>Folder layout.</strong></p>
+<pre><code>nlrb-blocking/
+├── scripts/         02_candidates_embedding.py, 03_candidates_charngram.py,
+│                    04_union_candidates.py, 05_assemble_blocks.py, 06_evaluate.py
+├── src/             channels/embedding_ann.py, channels/char_ngram_knn.py,
+│                    block_assembly.py, evaluation.py, preprocessing_v3.py
+├── data/input/      (reserved)
+├── data/output/     candidates_*.parquet, blocks.csv, evaluation_report.md
+├── lsh_results/     embeddings.npy, company_names.pkl   ← INPUTS to active pipeline
+├── embeddings_cache/  embeddings_cache.pkl              ← alternate form, same vectors
+├── legacy/          older LSH+mutual-kNN attempt + generate_embeddings_openai_fixed.py
+├── diagnostics/     analysis &amp; labeling helpers
+├── README.md, blocking_strategy.md, session_summary_2026-04-14.md</code></pre>
+<section id="the-preprocessing-dedup-step-the-place-names-first-turn-into-unique-strings" class="level3">
+<h3 class="anchored" data-anchor-id="the-preprocessing-dedup-step-the-place-names-first-turn-into-unique-strings">2.1 The preprocessing + dedup step (the place names first turn into unique strings)</h3>
+<p>The unique preprocessed name list <code>lsh_results/company_names.pkl</code> is built <strong>outside the active scripts</strong>, by <code>legacy/generate_embeddings_openai_fixed.py</code> (lines 49–126). This is the authoritative point where raw <code>company_name</code> strings become the universe of names that the rest of the pipeline operates on:</p>
+<ol type="1">
+<li>Read both <code>merged_*_ADDRESS_with_union_flag.parquet</code> files (lines 58–59).</li>
+<li><strong>Filter rows</strong> (lines 75–96):
+<ul>
+<li>drop <code>is_union_name == True</code></li>
+<li>drop <code>is_long_name == True</code></li>
+<li>R-side: keep <code>type ∈ {RC, RD}</code>; C-side: keep <code>type == CA</code></li>
+<li>drop null <code>company_name</code></li>
+</ul></li>
+<li><strong>Preprocess</strong> each surviving name (lines 103–110): <code>preprocess_employer()</code> from <code>preprocessing_v3.py</code> (10-stage cleanup — OCR fixes, DBA/slash handling, digit/local-number stripping, stop-word removal with hyphen guards, symbol normalization), then <code>standardize_company_name()</code> (canonical replacement for USPS / GM / Kaiser / Ford / Red Cross).</li>
+<li><strong>Deduplicate across R and C</strong> (lines 113–122): concatenate both sides, take <code>unique()</code>. Result: <strong>334,276 unique preprocessed names</strong> (this is the canonical figure cited by <code>evaluation_report.md</code> line 61 for the legacy block-size baseline, and by <code>clustering_results_table.md</code> line 17).</li>
+<li>Embed each unique name with <code>text-embedding-3-large</code> (3,072-d, L2-normalized) → <code>embeddings.npy</code> (334,276 × 3,072 float32) and the parallel <code>company_names.pkl</code>.</li>
+</ol>
+<blockquote class="blockquote">
+<p><strong>Source attribution is discarded at the dedup step.</strong> A name that appears in both R-side and C-side records becomes one row with no R/C tag. The “source” column in some downstream tables is therefore reconstructed by re-joining on the preprocessed name, not carried through.</p>
+</blockquote>
+</section>
+<section id="active-blocking-pipeline" class="level3">
+<h3 class="anchored" data-anchor-id="active-blocking-pipeline">2.2 Active blocking pipeline</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Script</th>
+<th>Reads</th>
+<th>Writes</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>scripts/02_candidates_embedding.py</code></td>
+<td><code>lsh_results/embeddings.npy</code>, <code>company_names.pkl</code></td>
+<td><code>data/output/candidates_embedding.parquet</code></td>
+<td>FAISS <code>IndexFlatIP</code> exact-cosine kNN, K=50, threshold ≥ 0.65 → edges <code>(name_a, name_b, score, channel='embedding')</code></td>
+</tr>
+<tr class="even">
+<td><code>scripts/03_candidates_charngram.py</code></td>
+<td><code>lsh_results/company_names.pkl</code></td>
+<td><code>data/output/candidates_charngram.parquet</code></td>
+<td>TF-IDF on char_wb 3–4-grams (min_df=2), L2-normalized; brute-force kNN, K=50, threshold ≥ 0.60</td>
+</tr>
+<tr class="odd">
+<td><code>scripts/04_union_candidates.py</code></td>
+<td>both candidate parquets</td>
+<td><code>data/output/candidates_union.parquet</code></td>
+<td>concatenate, collapse duplicate (name_a, name_b), label channel <code>char_ngram;embedding</code> if both fired</td>
+</tr>
+<tr class="even">
+<td><code>scripts/05_assemble_blocks.py</code></td>
+<td><code>candidates_union.parquet</code>, <code>company_names.pkl</code></td>
+<td><code>data/output/blocks.csv</code></td>
+<td>connected components at the global threshold; recursive threshold-tightening splitter on oversized components (0.68 → 0.95); weight-greedy capped union-find fallback; <strong>singletons excluded</strong> (<code>EXCLUDE_SINGLETONS=True</code>)</td>
+</tr>
+<tr class="odd">
+<td><code>scripts/06_evaluate.py</code></td>
+<td>the above + a fuzzy-found weak-recall proxy + legacy baseline</td>
+<td><code>data/output/evaluation_report.md</code></td>
+<td>block-size distribution, weak recall on 2,316 fuzzy-found pairs</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key params</strong>: BLOCK_SIZE_CAP=200, embedding K=50/τ=0.65, char-ngram K=50/τ=0.60.</p>
+</section>
+<section id="blocks.csv-schema-and-counts-from-evaluation_report.md" class="level3">
+<h3 class="anchored" data-anchor-id="blocks.csv-schema-and-counts-from-evaluation_report.md">2.3 <code>blocks.csv</code> — schema and counts (from <code>evaluation_report.md</code>)</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Column</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>block_id</code></td>
+<td>sequential int</td>
+</tr>
+<tr class="even">
+<td><code>company_idx</code></td>
+<td>row index into <code>company_names.pkl</code> (i.e.&nbsp;the canonical name-id)</td>
+</tr>
+<tr class="odd">
+<td><code>company_name</code></td>
+<td>preprocessed name string</td>
+</tr>
+<tr class="even">
+<td><code>block_size</code></td>
+<td>size of the block (≤ 200)</td>
+</tr>
+</tbody>
+</table>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 42%">
+<col style="width: 57%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Metric</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Total blocks</td>
+<td style="text-align: right;"><strong>51,630</strong></td>
+</tr>
+<tr class="even">
+<td>Names placed in non-singleton blocks</td>
+<td style="text-align: right;"><strong>224,767</strong></td>
+</tr>
+<tr class="odd">
+<td>Min / p50 / p95 / p99 / max block size</td>
+<td style="text-align: right;">2 / 3 / 12 / 31 / 197</td>
+</tr>
+<tr class="even">
+<td>Blocks at the 200-cap</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="odd">
+<td>Singleton rows emitted</td>
+<td style="text-align: right;">0 (excluded by design)</td>
+</tr>
+<tr class="even">
+<td>Total candidate edges (union)</td>
+<td style="text-align: right;">4,475,697 (embedding 1.91M + char-ngram 1.71M, overlap 0.86M)</td>
+</tr>
+<tr class="odd">
+<td>Weak-recall proxy: 2,316 fuzzy-found pairs co-blocked</td>
+<td style="text-align: right;"><strong>1,909 / 2,316 = 82.4%</strong> (legacy baseline: 0%)</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="pre-blocking-singletons-the-critical-coverage-gap" class="level3">
+<h3 class="anchored" data-anchor-id="pre-blocking-singletons-the-critical-coverage-gap">2.4 Pre-blocking singletons — the critical coverage gap</h3>
+<p>The blocking pipeline <strong>silently drops</strong> names that the connected-components + threshold-tightening passes leave with no edges above the cap-respecting threshold. Those names are not written to <code>blocks.csv</code>.</p>
+<p><strong>Count.</strong> `334,276 (unique preprocessed names) − 224,767 (in blocks.csv) = <strong>109,509 pre-blocking singletons</strong>.* These never enter clustering, never enter the cluster file, and at matching time fall back to the preprocessed name as their own cluster representative (see §4.2). This is the population the evaluation plan refers to as the “names that can never be aggregated” — the hard ceiling on firm-level coverage.</p>
+<blockquote class="blockquote">
+<p>The legacy comparison in <code>evaluation_report.md</code> lists 177,652 singletons under the old LSH pipeline (177,652 + 156,624 = 334,276). The new pipeline cuts the singleton pool from 177,652 to ~109,509 — a clear gain — but does not eliminate it.</p>
+</blockquote>
+<hr>
+</section>
+</section>
+<section id="stage-3-nlrb-clustering-with-llm-blocks.csv-cluster_assignments_20260517.csv" class="level2">
+<h2 class="anchored" data-anchor-id="stage-3-nlrb-clustering-with-llm-blocks.csv-cluster_assignments_20260517.csv">3. Stage 3 — <code>nlrb-clustering-with-LLM/</code> : <code>blocks.csv</code> → <code>cluster_assignments_20260517.csv</code></h2>
+<p>LLM-CER (Fu et al.&nbsp;2025) hierarchical clustering applied block-by-block. Treats blocking output as fixed and does not attempt cross-block merges.</p>
+<p><strong>Folder layout.</strong></p>
+<pre><code>nlrb-clustering-with-LLM/
+├── config.py                 S_S=12, S_D=4, MAX_BLOCK_SIZE=1000,
+│                             MODEL_NAME='gpt-5.4-mini', REASONING_EFFORT='low'
+├── run_full_pipeline.py      orchestrator (process_single_block)
+├── core/                     nrs_stage.py, cmr_stage.py, cluster_tracker.py,
+│                             llm_engine.py, data_models.py
+├── pipeline_helpers.py
+├── export_cluster_assignments.py        results JSONs → CSV
+├── analyze_clustering.py, analyze_results.py, check_cluster_of_blocks_results.ipynb
+├── embeddings_cache.pkl      (4.1 GB; same vectors as Stage 2's lsh_results/)
+├── blocks_merged.csv         input — 224,767 records, post-merge into ~15,764 bins
+└── results/blocks_&lt;run_id&gt;/block_&lt;id&gt;.json</code></pre>
+<section id="input-handling-what-enters-and-whats-filtered" class="level3">
+<h3 class="anchored" data-anchor-id="input-handling-what-enters-and-whats-filtered">3.1 Input handling — what enters and what’s filtered</h3>
+<ul>
+<li>The cluster pipeline reads <strong><code>blocks.csv</code> (or <code>blocks_merged.csv</code>, a small-block-merging optimization that bins blocks of size 2–11 into ~size-12 bins to amortize LLM cost).</strong> Same 224,767 names, just grouped into 15,764 bins instead of 51,630 raw blocks.</li>
+<li><strong>Names are taken as-is</strong> from blocking; no further dedup or normalization.</li>
+<li>Blocks with <code>block_size &gt; MAX_BLOCK_SIZE = 1000</code> are <strong>filtered out</strong> in <code>load_and_filter_data()</code> (<code>run_full_pipeline.py:335</code>). For the current run, no such blocks exist (max block size is 197 per <code>evaluation_report.md</code>), so this guard is dormant — historically it was the mechanism that excluded the “mega-block 0” (~50K records) from the older legacy pipeline, which is the source of the <code>CLAUDE.md</code> warning.</li>
+<li><code>EXCLUDE_SINGLETONS=True</code> does nothing here because blocking already excludes singletons.</li>
+</ul>
+</section>
+<section id="the-clustering-algorithm-data-flow-view-only" class="level3">
+<h3 class="anchored" data-anchor-id="the-clustering-algorithm-data-flow-view-only">3.2 The clustering algorithm (data-flow view only)</h3>
+<p>For each block: 1. <strong>NRS (Next Record Set)</strong>: partition block records into ~<code>S_S=12</code>-sized record sets via k-means on embeddings, ordered by a similarity chain. 2. <strong>LLM call</strong> on each record set → initial clusters (a <code>ClusteringResult</code> per set). 3. <strong>CMR (Cluster Merge &amp; Rotation)</strong>: nearest-to-centroid representative per cluster → new record sets → LLM → merge results into <code>ClusterTracker</code>. Repeat hierarchically. Sub-<code>MIN_BATCH_SIZE=6</code> sets accumulate in <code>BatchAccumulator</code> before being sent. 4. <strong>Exit</strong>: two consecutive all-singleton levels OR kNN-verification finds no merges. 5. <code>ClusterTracker.reconstruct_final_partition()</code> writes <code>final_clusters: List[List[company_idx]]</code> to <code>results/blocks_&lt;run_id&gt;/block_&lt;id&gt;.json</code>.</p>
+</section>
+<section id="output-construction-export_cluster_assignments.py" class="level3">
+<h3 class="anchored" data-anchor-id="output-construction-export_cluster_assignments.py">3.3 Output construction — <code>export_cluster_assignments.py</code></h3>
+<ol type="1">
+<li>Read <code>blocks_merged.csv</code> (all 224,767 records).</li>
+<li>Query <code>results/batch_state.db</code> (SQLite) for the result-file path of each completed block.</li>
+<li>For each block JSON, read <code>final_clusters</code> and tag every <code>company_idx</code> with an in-block <code>cluster_id</code> (0, 1, 2, …).</li>
+<li><strong>Left-join back</strong> onto the full input — every input row gets a row in the output, even if its block wasn’t (or hasn’t yet been) processed.</li>
+<li><strong>Unmatched records</strong> (none in the current 2026-05-17 run, but the codepath exists) get auto-assigned a singleton cluster within their block via <code>groupby([block_id]).cumcount()</code>.</li>
+<li>Add derived columns: <code>global_cluster_id = f"{block_id}_{cluster_id}"</code>, <code>cluster_size</code>, <code>is_singleton</code>.</li>
+</ol>
+</section>
+<section id="cluster_assignments_20260517.csv-verified-counts-queried-2026-06-01" class="level3">
+<h3 class="anchored" data-anchor-id="cluster_assignments_20260517.csv-verified-counts-queried-2026-06-01">3.4 <code>cluster_assignments_20260517.csv</code> — verified counts (queried 2026-06-01)</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 42%">
+<col style="width: 57%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Metric</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Total rows (= unique preprocessed names that entered blocking)</td>
+<td style="text-align: right;"><strong>224,767</strong></td>
+</tr>
+<tr class="even">
+<td>Unique <code>global_cluster_id</code></td>
+<td style="text-align: right;"><strong>91,120</strong></td>
+</tr>
+<tr class="odd">
+<td><code>is_singleton = 1</code> rows (LLM-decided singletons inside processed blocks)</td>
+<td style="text-align: right;"><strong>38,892</strong></td>
+</tr>
+<tr class="even">
+<td><code>cluster_size &gt; 1</code> rows (in a multi-name cluster)</td>
+<td style="text-align: right;"><strong>185,875</strong></td>
+</tr>
+<tr class="odd">
+<td>Avg names per multi-name cluster</td>
+<td style="text-align: right;">(224,767 − 38,892) / (91,120 − 38,892) ≈ <strong>3.56</strong></td>
+</tr>
+<tr class="even">
+<td>Columns</td>
+<td style="text-align: right;"><code>block_id, company_idx, company_name, block_size, merge_group, original_block_ids, cluster_id, global_cluster_id, cluster_size, is_singleton</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Important:</strong> the file has <strong>no <code>source</code> column</strong>, so R-side vs C-side membership cannot be read off the cluster file alone — it must be reconstructed by joining the preprocessed name back onto the two ADDRESS parquets.</p>
+</section>
+<section id="known-gotchas-from-claude.md" class="level3">
+<h3 class="anchored" data-anchor-id="known-gotchas-from-claude.md">3.5 Known gotchas (from <code>CLAUDE.md</code>)</h3>
+<ul>
+<li><strong>Cache mismatch:</strong> <code>embeddings_cache.pkl</code> is keyed on the <code>blocks.csv</code> names. Any name not in that exact set requires an OnDemand OpenAI call. Cache vectors must be L2-normalized before insertion.</li>
+<li><strong><code>Config.validate()</code></strong> asserts <code>DATA_FILE</code> exists; ancillary scripts must avoid calling it or validate manually.</li>
+<li><strong>Mega-block 0</strong> of ~50K records (legacy pipeline artifact) is skipped by <code>MAX_BLOCK_SIZE</code>. Not relevant to the 2026-05-17 run because the new blocking pipeline never produces a block &gt; 200.</li>
+<li><strong><code>requirements.txt</code></strong> is UTF-16-encoded.</li>
+<li><strong>Two-consecutive-all-singleton exit</strong>, not one. kNN verification can re-extend the hierarchy.</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="stage-4-nlrb-matching-cases-address-tables-clusters-rc-pairs" class="level2">
+<h2 class="anchored" data-anchor-id="stage-4-nlrb-matching-cases-address-tables-clusters-rc-pairs">4. Stage 4 — <code>nlrb-matching-cases/</code> : address tables + clusters → R↔︎C pairs</h2>
+<section id="preprocessing-the-same-code-re-applied-at-matching-time" class="level3">
+<h3 class="anchored" data-anchor-id="preprocessing-the-same-code-re-applied-at-matching-time">4.1 Preprocessing (the same code, re-applied at matching time)</h3>
+<p>Two modules used together everywhere a company name is touched:</p>
+<ul>
+<li><strong><code>preprocessing_v3.py :: preprocess_employer(name)</code></strong> — 10-stage normalizer:
+<ul>
+<li>OCR leading-zero fix, NFKD-to-ASCII, lowercase + strip</li>
+<li>DBA removal (<code>d/b/a</code>, <code>d.b.a.</code>, <code>dba</code>, “doing business as”)</li>
+<li>Slash abbreviations (<code>a/k/a</code> → <code>aka</code>, <code>f/k/a</code> → <code>fka</code>, <code>c/o</code> removed)</li>
+<li>Slash → space</li>
+<li><code>local [number]</code> / <code>no. [number]</code> removal</li>
+<li>2+ consecutive digits stripped, orphan hyphens cleaned</li>
+<li>Corporate-term normalization</li>
+<li>Stop-word removal with <strong>hyphen guards</strong> (LLC, Inc, Corp, …; preserves “co-op”)</li>
+<li><code>&amp;</code> → <code>and</code>, <code>bros</code> → <code>brothers</code>, punctuation removed</li>
+<li>Whitespace collapsed</li>
+</ul></li>
+<li><strong><code>name_standardization.py :: standardize_company_name(preprocessed_name)</code></strong> — canonical-form replacement for 5 high-frequency firms (USPS, GM, Kaiser Permanente, Ford Motor, American Red Cross). Evidence counts: USPS 2,150 names; GM 487; Kaiser 436; Ford 218; Red Cross 270.</li>
+</ul>
+<p>The order is always <strong><code>preprocess_employer</code> → <code>standardize_company_name</code></strong>. This is the canonical preprocessing pipeline; it’s applied in (a) blocking’s name-list build, (b) <code>add_cluster_representatives.py</code>, and (c) <code>match_r_to_c_cases.py</code>.</p>
+</section>
+<section id="add_cluster_representatives.py-joining-clusters-to-the-address-tables" class="level3">
+<h3 class="anchored" data-anchor-id="add_cluster_representatives.py-joining-clusters-to-the-address-tables">4.2 <code>add_cluster_representatives.py</code> — joining clusters to the address tables</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>What</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Inputs</td>
+<td><code>cluster_assignments_20260517.csv</code>, both <code>merged_*_ADDRESS_with_union_flag.parquet</code></td>
+</tr>
+<tr class="even">
+<td>Rule for picking a representative</td>
+<td><strong>Shortest name per cluster</strong> (line 40): <code>.sort_values('company_name', key=lambda s: s.str.len()).drop_duplicates(subset='global_cluster_id', keep='first')</code>.</td>
+</tr>
+<tr class="odd">
+<td>Preprocessing re-applied</td>
+<td>Yes — <code>preprocess_name()</code> (lines 21–25) calls <code>preprocess_employer</code> then <code>standardize_company_name</code> on every input address-table row before joining to the cluster file.</td>
+</tr>
+<tr class="even">
+<td>Fallback when no cluster match</td>
+<td>The preprocessed name itself becomes the representative (line 82).</td>
+</tr>
+<tr class="odd">
+<td>Output</td>
+<td>Adds a <code>cluster_representative</code> column to both ADDRESS parquets (line 90). Reports cluster-match rate on line 87.</td>
+</tr>
+</tbody>
+</table>
+<p>This is where the ~109,509 pre-blocking singletons re-enter the pipeline as themselves: they have no row in <code>cluster_assignments_20260517.csv</code>, the lookup misses, and the fallback writes their preprocessed name into <code>cluster_representative</code>. They will participate in matching as a cluster-of-one.</p>
+<blockquote class="blockquote">
+<p><strong>Severity flag (see <code>../NLRB_evaluation_next_steps.md</code> §3).</strong> “Shortest name” is the most collision-prone selection policy possible (<code>abc inc</code>, <code>the company</code>, single-word marks). Two genuinely different clusters that share a short representative are <strong>silently linked downstream</strong> at matching even though the cluster file kept them separate. Step 1’s coverage table is the right place to also surface the size distribution of <code>cluster_representative</code> collisions across clusters.</p>
+</blockquote>
+</section>
+<section id="match_r_to_c_cases.py-the-matching-pipeline" class="level3">
+<h3 class="anchored" data-anchor-id="match_r_to_c_cases.py-the-matching-pipeline">4.3 <code>match_r_to_c_cases.py</code> — the matching pipeline</h3>
+<p><strong>CLI knobs</strong> (lines 786–832): <code>--match-mode {exact|fuzzy|hybrid}</code> (default hybrid), <code>--fuzzy-threshold</code> (default 82), <code>--city-threshold</code> (default 85), <code>--company-column</code> (default <code>company_name</code>; set to <code>cluster_representative</code> for cluster mode), <code>--output-prefix</code>.</p>
+<p><strong>Load and filter</strong> (lines 134–237): 1. Read four parquets: <code>merged_R_CASES_final</code>, <code>merged_R_CASES_ADDRESS_with_union_flag</code>, <code>merged_C_CASES_final</code>, <code>merged_C_CASES_ADDRESS_with_union_flag</code>. 2. Rename <code>case_number</code> → <code>r_case_number</code>/<code>c_case_number</code> if needed. 3. <strong>Type filter</strong>: keep <code>type == 'RC'</code> on R-side; <code>type == 'CA'</code> on C-side. 4. Deduplicate address tables on case number. 5. <strong>Drop rows</strong> flagged <code>is_union_name == True</code> or <code>is_long_name == True</code>. 6. Join case to address (1:1 on case_number). 7. Drop rows where <code>company_name</code> is actually a case-number string. 8. Preprocess the <code>--company-column</code> value (lines 210–211 — same two-stage pipeline). 9. Normalize <code>state</code> and <code>city</code>: lowercase, strip, drop punctuation, collapse whitespace. 10. Drop rows missing company / state / city (lines 218–237). 11. <strong>Drop R cases with missing <code>date_closed</code></strong> (the date-window filter requires both endpoints).</p>
+<p><strong>Exact pass</strong> (lines 322–392): - Equi-join on <code>(match_company, match_state)</code> in 5,000-row chunks. - City gate: exact normalised city match accepted; otherwise <code>fuzz.ratio ≥ city_threshold</code> required. - Date gate: keep rows where <code>c.date_filed ∈ [r.date_filed, r.date_closed]</code>. - Output rows tagged <code>match_method='exact'</code>, <code>fuzzy_score=100.0</code>.</p>
+<p><strong>Fuzzy pass</strong> (lines 398–571, fuzzy/hybrid only): - Block on <code>match_state</code>. - For each state, get unique R-side names → <code>rapidfuzz.process.extract(token_sort_ratio, score_cutoff=fuzzy_threshold)</code> against unique C-side names. - Expand back to case rows, apply same city gate and date gate. - In hybrid mode, fuzzy runs on <strong>all</strong> RC cases (not just those with no exact hit) and pairs already found by exact are deduplicated, so fuzzy is strictly additive.</p>
+<p><strong>Output schema</strong> (<code>rc_ac_matches.parquet</code>, lines 307–316):</p>
+<pre><code>r_case_number, c_case_number,
+r_date_filed, r_date_closed, c_date_filed,
+r_company_name, r_state, r_city,
+c_company_name, c_state, c_city,
+match_company_r, match_company_c,
+match_state_r, match_state_c,
+match_city_r, match_city_c,
+match_method, fuzzy_score</code></pre>
+<p><code>_summary.txt</code> reports RC count, RC-with-≥1-match count, CA count, CA-with-≥1-match count, total pairs, per-method breakdown, fuzzy-score quantiles, matches-per-case distribution.</p>
+</section>
+<section id="numeric-checkpoints-at-the-matching-stage" class="level3">
+<h3 class="anchored" data-anchor-id="numeric-checkpoints-at-the-matching-stage">4.4 Numeric checkpoints at the matching stage</h3>
+<p>From <code>matching_summary.txt</code> (hybrid fuzzy mode, default <code>company_column=company_name</code>):</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Metric</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>RC cases in dataset</td>
+<td style="text-align: right;"><strong>141,732</strong></td>
+</tr>
+<tr class="even">
+<td>RC cases with ≥ 1 CA match</td>
+<td style="text-align: right;">25,867 (18.3%)</td>
+</tr>
+<tr class="odd">
+<td>CA cases in dataset</td>
+<td style="text-align: right;"><strong>754,030</strong></td>
+</tr>
+<tr class="even">
+<td>CA cases matched to ≥ 1 RC</td>
+<td style="text-align: right;">46,573 (6.2%)</td>
+</tr>
+<tr class="odd">
+<td>Total match pairs</td>
+<td style="text-align: right;"><strong>50,472</strong></td>
+</tr>
+<tr class="even">
+<td>&nbsp;&nbsp; exact</td>
+<td style="text-align: right;">38,962 (77.2%)</td>
+</tr>
+<tr class="odd">
+<td>&nbsp;&nbsp; fuzzy</td>
+<td style="text-align: right;">11,510 (22.8%)</td>
+</tr>
+<tr class="even">
+<td>Fuzzy-score mean / median / min</td>
+<td style="text-align: right;">92.4 / 93.5 / 82.0</td>
+</tr>
+</tbody>
+</table>
+<p>From <code>rc_ac_cluster_matches_20260517_summary.txt</code> (exact mode, <code>company_column=cluster_representative</code>):</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Metric</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>RC cases</td>
+<td style="text-align: right;">141,732</td>
+</tr>
+<tr class="even">
+<td>RC cases with ≥ 1 CA match</td>
+<td style="text-align: right;"><strong>29,554 (20.9%)</strong></td>
+</tr>
+<tr class="odd">
+<td>CA cases</td>
+<td style="text-align: right;">754,030</td>
+</tr>
+<tr class="even">
+<td>CA cases matched to ≥ 1 RC</td>
+<td style="text-align: right;"><strong>55,611 (7.4%)</strong></td>
+</tr>
+<tr class="odd">
+<td>Total match pairs</td>
+<td style="text-align: right;"><strong>60,731</strong> (100% exact, by construction)</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="the-three-notebooks" class="level3">
+<h3 class="anchored" data-anchor-id="the-three-notebooks">4.5 The three notebooks</h3>
+<ul>
+<li><strong><code>compare_matching_methods.ipynb</code></strong> — builds the three populations on which the evaluation is stratified: agreement (both methods) ≈ <strong>49,426 pairs</strong> (39,738 trivially identical + 9,688 non-trivial), fuzzy-only ≈ <strong>1,046 pairs</strong>, cluster-only ≈ <strong>11,305 pairs</strong>.</li>
+<li><strong><code>build_evaluation_sample.ipynb</code></strong> — seeded stratified draw of 250 pairs: 100 from cluster-only, 100 from fuzzy-only, 50 from agreement-non-trivial. Blinded.</li>
+<li><strong><code>analyze_evaluation_results.ipynb</code></strong> — unblinds against the key, computes per-cell precision with Wilson CIs (<code>p_cluster_only ≈ 1.00</code>, <code>p_fuzzy_only ≈ 0.959</code>, <code>p_agreement ≈ 1.00</code>). Step 2 of the evaluation plan re-weights these by their true pool sizes.</li>
+</ul>
+<p><code>clustering_failure_analysis.md</code> decomposes the 93 fuzzy-only pairs labelled “true match” into three modes: A (33%) LLM same-block split, B (30%) blocking failure, C (37%) pre-blocking singleton — confirming that ~67% of clustering “misses” are upstream of the LLM itself.</p>
+<hr>
+</section>
+</section>
+<section id="master-coverage-table-for-step-1" class="level2">
+<h2 class="anchored" data-anchor-id="master-coverage-table-for-step-1">5. Master coverage table for Step 1</h2>
+<p>This is the single table Step 1 should publish — every count cited to a primary source.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 18%">
+<col style="width: 18%">
+<col style="width: 18%">
+<col style="width: 25%">
+<col style="width: 18%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>#</th>
+<th>Stage</th>
+<th>Population</th>
+<th style="text-align: right;">Count</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>0a</td>
+<td>Raw, per system, R-side address rows</td>
+<td>CHIPS + CATS + NxGen</td>
+<td style="text-align: right;">115,171 + 74,095 + 35,445 = <strong>224,711</strong></td>
+<td>per-system notebooks</td>
+</tr>
+<tr class="even">
+<td>0b</td>
+<td>Raw, per system, C-side address rows</td>
+<td>CHIPS + CATS + NxGen</td>
+<td style="text-align: right;">509,002 + 320,562 + 243,846 = <strong>1,073,410</strong></td>
+<td>per-system notebooks</td>
+</tr>
+<tr class="odd">
+<td>1a</td>
+<td>After merge + dedup on case_number — R</td>
+<td>rows in <code>merged_R_CASES_ADDRESS_with_union_flag.parquet</code></td>
+<td style="text-align: right;"><strong>197,451</strong></td>
+<td><code>merge_R_CASES_ADDRESS.ipynb</code></td>
+</tr>
+<tr class="even">
+<td>1b</td>
+<td>After merge + dedup on case_number — C</td>
+<td>rows in <code>merged_C_CASES_ADDRESS_with_union_flag.parquet</code></td>
+<td style="text-align: right;"><strong>1,038,762</strong></td>
+<td><code>merge_C_CASES_ADDRESS.ipynb</code></td>
+</tr>
+<tr class="odd">
+<td>2a</td>
+<td>RC-type rows in matching dataset</td>
+<td>after <code>load_and_prepare()</code> — see §5.1 for filter cascade</td>
+<td style="text-align: right;"><strong>141,732</strong></td>
+<td><code>matching_summary.txt</code>; replay in <code>explore_case_tables.ipynb</code> §9</td>
+</tr>
+<tr class="even">
+<td>2a′</td>
+<td>RC-type rows actually entering the date-window join</td>
+<td>after <code>_prepare_slim_frames()</code> — see footnote below table</td>
+<td style="text-align: right;"><strong>141,025</strong></td>
+<td><code>explore_case_tables.ipynb</code> §9a</td>
+</tr>
+<tr class="odd">
+<td>2b</td>
+<td>CA-type rows reaching matching</td>
+<td>after <code>load_and_prepare()</code> — see §5.1 for filter cascade</td>
+<td style="text-align: right;"><strong>754,030</strong></td>
+<td><code>matching_summary.txt</code>; replay in <code>explore_case_tables.ipynb</code> §9</td>
+</tr>
+<tr class="even">
+<td>3</td>
+<td>Unique preprocessed names (R ∪ C)</td>
+<td>input to embedding + blocking</td>
+<td style="text-align: right;"><strong>334,276</strong></td>
+<td><code>evaluation_report.md</code> (legacy baseline n_names), <code>generate_embeddings_openai_fixed.py</code></td>
+</tr>
+<tr class="odd">
+<td>4a</td>
+<td>Names placed in non-singleton blocks</td>
+<td>rows in <code>blocks.csv</code></td>
+<td style="text-align: right;"><strong>224,767</strong></td>
+<td><code>evaluation_report.md</code></td>
+</tr>
+<tr class="even">
+<td>4b</td>
+<td>Pre-blocking singletons (never enter blocking)</td>
+<td>334,276 − 224,767</td>
+<td style="text-align: right;"><strong>109,509</strong></td>
+<td>derived</td>
+</tr>
+<tr class="odd">
+<td>5a</td>
+<td>Rows in <code>cluster_assignments_20260517.csv</code></td>
+<td>(= names that entered blocking)</td>
+<td style="text-align: right;"><strong>224,767</strong></td>
+<td>verified directly</td>
+</tr>
+<tr class="even">
+<td>5b</td>
+<td>Global clusters</td>
+<td>distinct <code>global_cluster_id</code></td>
+<td style="text-align: right;"><strong>91,120</strong></td>
+<td>verified directly</td>
+</tr>
+<tr class="odd">
+<td>5c</td>
+<td>LLM-decided singletons (inside processed blocks)</td>
+<td><code>is_singleton == 1</code></td>
+<td style="text-align: right;"><strong>38,892</strong></td>
+<td>verified directly</td>
+</tr>
+<tr class="even">
+<td>5d</td>
+<td>Names in multi-name clusters</td>
+<td><code>cluster_size &gt; 1</code></td>
+<td style="text-align: right;"><strong>185,875</strong></td>
+<td>verified directly</td>
+</tr>
+<tr class="odd">
+<td>5e</td>
+<td>Names with <strong>no</strong> cluster representative (cluster-rep falls back to preprocessed name)</td>
+<td>334,276 − 224,767</td>
+<td style="text-align: right;"><strong>109,509</strong></td>
+<td>derived (see §4.2)</td>
+</tr>
+<tr class="even">
+<td>6a</td>
+<td>RC ↔︎ CA pairs — hybrid fuzzy</td>
+<td>total in <code>rc_ac_matches.parquet</code></td>
+<td style="text-align: right;"><strong>50,472</strong></td>
+<td><code>matching_summary.txt</code></td>
+</tr>
+<tr class="odd">
+<td>6b</td>
+<td>&nbsp;&nbsp;exact / fuzzy split</td>
+<td></td>
+<td style="text-align: right;">38,962 / 11,510</td>
+<td><code>matching_summary.txt</code></td>
+</tr>
+<tr class="even">
+<td>6c</td>
+<td>RC ↔︎ CA pairs — cluster exact</td>
+<td>total in <code>rc_ac_cluster_matches_20260517.parquet</code></td>
+<td style="text-align: right;"><strong>60,731</strong></td>
+<td><code>rc_ac_cluster_matches_20260517_summary.txt</code></td>
+</tr>
+<tr class="odd">
+<td>7a</td>
+<td>Audit pool — agreement (trivial, identical preprocessed names)</td>
+<td>both methods</td>
+<td style="text-align: right;"><strong>39,738</strong></td>
+<td><code>../NLRB_evaluation_next_steps.md</code> §2</td>
+</tr>
+<tr class="even">
+<td>7b</td>
+<td>Audit pool — agreement (non-trivial)</td>
+<td>both methods</td>
+<td style="text-align: right;"><strong>9,688</strong></td>
+<td><code>../NLRB_evaluation_next_steps.md</code> §2</td>
+</tr>
+<tr class="odd">
+<td>7c</td>
+<td>Audit pool — fuzzy-only</td>
+<td>hybrid fuzzy minus cluster</td>
+<td style="text-align: right;"><strong>1,046</strong></td>
+<td><code>../NLRB_evaluation_next_steps.md</code> §2</td>
+</tr>
+<tr class="even">
+<td>7d</td>
+<td>Audit pool — cluster-only</td>
+<td>cluster minus hybrid fuzzy</td>
+<td style="text-align: right;"><strong>11,305</strong></td>
+<td><code>../NLRB_evaluation_next_steps.md</code> §2</td>
+</tr>
+</tbody>
+</table>
+<p>Numbers that move horizontally between stages without loss are the ones to flag in green; the two big drops are <strong>(1a + 1b) → (2a + 2b)</strong> (type-filter and flag-filter, intentional) and <strong>3 → 4a</strong> (pre-blocking singletons, the load-bearing coverage gap).</p>
+<blockquote class="blockquote">
+<p><strong>Footnote — the 707-row distinction between rows 2a and 2a′.</strong> <code>matching_summary.txt</code> reports “RC cases in dataset: 141,732”, which is the count emitted by <code>load_and_prepare()</code>. The matcher then calls <code>_prepare_slim_frames()</code> separately for each match pass, which drops an additional <strong>702 RC cases with missing <code>date_closed</code></strong> (open cases — no upper endpoint for the date window) and <strong>5 RC cases with <code>date_closed &lt; date_filed</code></strong> (malformed intervals). So the actual count entering the RC↔︎CA join is <strong>141,025</strong>, not 141,732. The C-side has no equivalent pre-filter — the date window is applied at join time on the RC side only. Worth knowing because per-RC-case precision/recall figures should use 141,025 as the denominator, not 141,732.</p>
+</blockquote>
+<hr>
+</section>
+<section id="per-filter-drop-attribution-closes-gap-a" class="level2">
+<h2 class="anchored" data-anchor-id="per-filter-drop-attribution-closes-gap-a">5.1 Per-filter drop attribution (closes Gap A)</h2>
+<p>Decomposition of rows <strong>1a → 2a</strong> (R-side) and <strong>1b → 2b</strong> (C-side). Replayed step-for-step from <code>match_r_to_c_cases.py</code> lines 133–271 in <code>explore_case_tables.ipynb</code> §9; every drop is attributable to a specific filter.</p>
+<section id="r-side-cascade-197451-r_addr-rows-141025-entering-match" class="level3">
+<h3 class="anchored" data-anchor-id="r-side-cascade-197451-r_addr-rows-141025-entering-match">R-side cascade: 197,451 R_ADDR rows → 141,025 entering match</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 17%">
+<col style="width: 17%">
+<col style="width: 23%">
+<col style="width: 23%">
+<col style="width: 17%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>#</th>
+<th>Filter</th>
+<th style="text-align: right;">Surviving rows</th>
+<th style="text-align: right;">Dropped</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>R0</td>
+<td><code>R_ADDR</code> (loaded)</td>
+<td style="text-align: right;">197,451</td>
+<td style="text-align: right;">—</td>
+<td>row 1a</td>
+</tr>
+<tr class="even">
+<td>R0′</td>
+<td><code>R_FINAL</code> (loaded)</td>
+<td style="text-align: right;">197,253</td>
+<td style="text-align: right;">—</td>
+<td>198 fewer than <code>R_ADDR</code>; 169 of those are RC</td>
+</tr>
+<tr class="odd">
+<td>R1</td>
+<td><code>R_FINAL</code> filter <code>type=='RC'</code></td>
+<td style="text-align: right;">144,319</td>
+<td style="text-align: right;">(52,934 non-RC; intentional)</td>
+<td>non-RC types removed</td>
+</tr>
+<tr class="even">
+<td>R2</td>
+<td><code>R_ADDR</code> dedup on <code>r_case_number</code></td>
+<td style="text-align: right;">197,451</td>
+<td style="text-align: right;">0</td>
+<td>confirms merge dedup was complete</td>
+</tr>
+<tr class="odd">
+<td>R3</td>
+<td><code>R_ADDR</code> drop <code>is_union_name \| is_long_name</code></td>
+<td style="text-align: right;">194,414</td>
+<td style="text-align: right;">3,037 (union 2,671 + long 374, overlap 8)</td>
+<td>on all R_ADDR types; only the RC subset matters downstream</td>
+</tr>
+<tr class="even">
+<td>R4</td>
+<td>Inner join <code>R_FINAL(RC) ⋈ R_ADDR(unflagged)</code></td>
+<td style="text-align: right;"><strong>142,200</strong></td>
+<td style="text-align: right;">2,119</td>
+<td>RC cases whose <code>R_ADDR</code> row was flag-dropped (= 2,124 flagged RC R_ADDR rows − 5 in the R_ADDR-only-not-in-R_FINAL set)</td>
+</tr>
+<tr class="odd">
+<td>R5</td>
+<td>Drop <code>company_name == case_number</code> pattern</td>
+<td style="text-align: right;">142,200</td>
+<td style="text-align: right;">0</td>
+<td>dormant filter on R-side</td>
+</tr>
+<tr class="even">
+<td>R6</td>
+<td>Drop empty <code>match_company / match_state / match_city</code> after normalize</td>
+<td style="text-align: right;"><strong>141,732</strong></td>
+<td style="text-align: right;">468 (company 147, state 164, city 430 — overlapping)</td>
+<td>post-normalization NAs and whitespace-only strings; <strong>= row 2a</strong></td>
+</tr>
+<tr class="odd">
+<td>R7</td>
+<td>Drop missing <code>date_closed</code> (open cases)</td>
+<td style="text-align: right;">141,030</td>
+<td style="text-align: right;">702</td>
+<td><code>_prepare_slim_frames</code>; 702 of the 1,127 R_FINAL NA-date_closed rows are RC</td>
+</tr>
+<tr class="even">
+<td>R8</td>
+<td>Drop <code>date_closed &lt; date_filed</code></td>
+<td style="text-align: right;"><strong>141,025</strong></td>
+<td style="text-align: right;">5</td>
+<td><code>_prepare_slim_frames</code>; malformed intervals; <strong>= row 2a′</strong></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="c-side-cascade-1038762-c_addr-rows-754030-entering-match" class="level3">
+<h3 class="anchored" data-anchor-id="c-side-cascade-1038762-c_addr-rows-754030-entering-match">C-side cascade: 1,038,762 C_ADDR rows → 754,030 entering match</h3>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 17%">
+<col style="width: 17%">
+<col style="width: 23%">
+<col style="width: 23%">
+<col style="width: 17%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>#</th>
+<th>Filter</th>
+<th style="text-align: right;">Surviving rows</th>
+<th style="text-align: right;">Dropped</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>C0</td>
+<td><code>C_ADDR</code> (loaded)</td>
+<td style="text-align: right;">1,038,762</td>
+<td style="text-align: right;">—</td>
+<td>row 1b</td>
+</tr>
+<tr class="even">
+<td>C0′</td>
+<td><code>C_FINAL</code> (loaded)</td>
+<td style="text-align: right;">1,038,762</td>
+<td style="text-align: right;">—</td>
+<td>C_ADDR ⇔ C_FINAL is 1:1, no asymmetry</td>
+</tr>
+<tr class="odd">
+<td>C1</td>
+<td><code>C_FINAL</code> filter <code>type=='CA'</code></td>
+<td style="text-align: right;">771,459</td>
+<td style="text-align: right;">(267,303 non-CA; intentional)</td>
+<td>dominantly CB cases, removed</td>
+</tr>
+<tr class="even">
+<td>C2</td>
+<td><code>C_ADDR</code> dedup on <code>c_case_number</code></td>
+<td style="text-align: right;">1,038,762</td>
+<td style="text-align: right;">0</td>
+<td>confirms merge dedup was complete</td>
+</tr>
+<tr class="odd">
+<td>C3</td>
+<td><code>C_ADDR</code> drop <code>is_union_name \| is_long_name</code></td>
+<td style="text-align: right;">853,315</td>
+<td style="text-align: right;">185,447 (union 180,624 + long 23,520, overlap 18,697)</td>
+<td>on all C_ADDR types; only the CA subset matters downstream</td>
+</tr>
+<tr class="even">
+<td>C4</td>
+<td>Inner join <code>C_FINAL(CA) ⋈ C_ADDR(unflagged)</code></td>
+<td style="text-align: right;">756,718</td>
+<td style="text-align: right;">14,741</td>
+<td>CA cases whose <code>C_ADDR</code> row was flag-dropped; matches the section-5 figure exactly (no R_ADDR-style asymmetry to subtract)</td>
+</tr>
+<tr class="odd">
+<td>C5</td>
+<td>Drop <code>company_name == case_number</code> pattern</td>
+<td style="text-align: right;">756,716</td>
+<td style="text-align: right;">2</td>
+<td>two CA cases had a case-number string in <code>company_name</code></td>
+</tr>
+<tr class="even">
+<td>C6</td>
+<td>Drop empty <code>match_company / match_state / match_city</code> after normalize</td>
+<td style="text-align: right;"><strong>754,030</strong></td>
+<td style="text-align: right;">2,686 (company 1,788, state 76, city 2,653 — overlapping)</td>
+<td>post-normalization NAs and whitespace-only strings; <strong>= row 2b</strong>. No <code>_prepare_slim_frames</code> date filter applies on C-side.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="what-the-cascade-tells-us" class="level3">
+<h3 class="anchored" data-anchor-id="what-the-cascade-tells-us">What the cascade tells us</h3>
+<ul>
+<li><strong>The single largest drop on both sides is the type filter</strong> (52,934 R; 267,303 C), and it is intentional — non-RC R-cases and non-CA C-cases are not in scope.</li>
+<li><strong>The largest data-driven drop is the union/long flag</strong> (intentional but downstream-sensitive): 2,124 RC rows on the R-side, 14,741 CA rows on the C-side. The C-side flag drop is <strong>6.9×</strong> the R-side rate in absolute terms, and <strong>1.5×</strong> in proportional terms (1.91% of CA vs 1.27% of RC after type filter — see <code>explore_case_tables.ipynb</code> §5).</li>
+<li><strong>Empty match keys</strong> are a small but real drop (468 R / 2,686 C). On the C-side the dominant missing field is <code>city</code> (2,653) followed by <code>company_name</code> (1,788) — worth noting if a future Step 1 reader wants to break coverage by missing-field-type.</li>
+<li><strong>The R-side cross-table asymmetry contributes 5 hidden drops</strong>: of the 169 RC case numbers that appear in <code>R_ADDR</code> but not <code>R_FINAL</code>, 5 are also flagged, so they would have been dropped twice — but the inner-join happens first, so they only count once toward the inner-join loss. Net effect: the inner-join loss (2,119) is exactly 5 below the section-5 figure for flagged RC R_ADDR rows (2,124).</li>
+<li><strong>The 707-row <code>load_and_prepare</code> vs actual-matching gap</strong> (footnote above) is small but specifically about R-side data quality, not about filtering policy.</li>
+</ul>
+<hr>
+</section>
+</section>
+<section id="discrepancies-and-stale-numbers-to-be-aware-of" class="level2">
+<h2 class="anchored" data-anchor-id="discrepancies-and-stale-numbers-to-be-aware-of">6. Discrepancies and stale numbers to be aware of</h2>
+<p>These are inconsistencies between docs in the repo that surfaced while tracing the flow. They do not affect the verified counts above but they will cause confusion in any reader who reads the docs cold:</p>
+<ol type="1">
+<li><strong><code>clustering_results_table.md</code> is partially stale.</strong> It states the cluster-export script reads “all 334,276 records from the input CSV” and that “177,652 records whose blocks were not processed … are treated as singletons”. That description is true of an <strong>earlier</strong> clustering run that was driven by the <strong>legacy</strong> blocking pipeline (217,136 blocks / 177,652 singletons / 156,624 in non-singleton blocks). The actual <code>cluster_assignments_20260517.csv</code> in the matching folder has <strong>224,767 rows</strong>, not 334,276 — it was produced from the <strong>new</strong> blocking pipeline’s <code>blocks.csv</code> (which already excludes singletons), so the “auto-fill singletons” branch of <code>export_cluster_assignments.py</code> matched 0 rows for this run. The 224,767 figure is the one that flows into matching today; the 334,276 figure is the universe of unique preprocessed names, of which only 224,767 ever made it to blocks/clusters.</li>
+<li><strong>The 38,892-singleton figure in <code>../NLRB_evaluation_next_steps.md</code> Step 1.</strong> Verified: <code>is_singleton == 1</code> = 38,892 in <code>cluster_assignments_20260517.csv</code>. These are <strong>LLM-decided</strong> singletons inside processed blocks (a name that was in a block but the LLM judged it had no peer). They are <strong>not</strong> the same as the pre-blocking singletons (109,509). Both numbers should appear in the coverage figure.</li>
+<li><strong>CLAUDE.md (clustering) mentions “mega-block 0 (~50K records)” and <code>MAX_BLOCK_SIZE=1000</code>.</strong> That guard is dormant for the 2026-05-17 run because the new blocking pipeline’s largest block is 197. The warning is a holdover from the legacy hierarchical pipeline and is harmless as long as the input remains the new <code>blocks.csv</code>.</li>
+<li><strong>Source attribution is dropped at the dedup step in §2.1 and never restored in the cluster file.</strong> Anywhere a doc reports R-only / C-only counts of clusters, it is reconstructing that by joining the preprocessed name back to the address parquets — not reading it off the cluster file. Worth surfacing in Step 1 so readers know the cluster file is name-centric, not record-centric.</li>
+<li><strong><code>name_data_flow</code> ↔︎ <code>NLRB_PIPELINE.md</code>.</strong> <code>NLRB_PIPELINE.md</code> notes that downstream stages “should read from <code>Merge_files/</code> (or a symlink to it), not from their own local copies.” In practice, <code>nlrb-matching-cases/</code> holds local copies of the two ADDRESS parquets, and <code>nlrb-blocking/</code> reads from <code>lsh_results/company_names.pkl</code> (built once, off the merged parquets). Worth a single-line check before each Step-1 publish that all four locations have the same SHA or mtime.</li>
+</ol>
+<hr>
+</section>
+<section id="file-inventory-where-every-number-above-lives" class="level2">
+<h2 class="anchored" data-anchor-id="file-inventory-where-every-number-above-lives">7. File inventory (where every number above lives)</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Stage</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>nlrb-creating-files/{CHIPS,CATS,NxGen}/{R,C}_CASES_ADDRESS_*.ipynb</code></td>
+<td>1</td>
+<td>Per-system extracts</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-creating-files/Merge_files/merge_{R,C}_CASES_ADDRESS.ipynb</code></td>
+<td>1</td>
+<td>Concat + dedup</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-creating-files/Merge_files/flag_union_names_v2.ipynb</code></td>
+<td>1</td>
+<td><code>is_union_name</code>, <code>is_long_name</code>, <code>matched_union_terms</code></td>
+</tr>
+<tr class="even">
+<td><code>nlrb-creating-files/Merge_files/merged_{R,C}_CASES_ADDRESS_with_union_flag.parquet</code></td>
+<td>1</td>
+<td>Canonical address tables (197,451 / 1,038,762)</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-creating-files/Merge_files/merged_{R,C}_CASES_final.parquet</code></td>
+<td>1</td>
+<td>Case-level: type + dates</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-blocking/legacy/generate_embeddings_openai_fixed.py</code></td>
+<td>2</td>
+<td>Builds the 334,276-unique-name list (preprocess + dedup + embed)</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-blocking/lsh_results/company_names.pkl</code>, <code>embeddings.npy</code></td>
+<td>2</td>
+<td>The 334,276 names and their vectors</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-blocking/scripts/02..06_*.py</code></td>
+<td>2</td>
+<td>Active blocking pipeline</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-blocking/data/output/blocks.csv</code></td>
+<td>2</td>
+<td>51,630 blocks / 224,767 names</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-blocking/data/output/evaluation_report.md</code></td>
+<td>2</td>
+<td>Cost + weak-recall diagnostics</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-clustering-with-LLM/run_full_pipeline.py</code> + <code>core/*.py</code></td>
+<td>3</td>
+<td>LLM-CER orchestration</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-clustering-with-LLM/blocks_merged.csv</code></td>
+<td>3</td>
+<td>224,767 names re-binned to ~15,764 bins of ~12</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-clustering-with-LLM/results/blocks_&lt;run&gt;/block_&lt;id&gt;.json</code></td>
+<td>3</td>
+<td>Per-block <code>final_clusters</code></td>
+</tr>
+<tr class="even">
+<td><code>nlrb-clustering-with-LLM/export_cluster_assignments.py</code></td>
+<td>3</td>
+<td>JSONs → CSV</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-matching-cases/cluster_assignments_20260517.csv</code></td>
+<td>3 → 4</td>
+<td><strong>224,767 rows / 91,120 clusters / 38,892 singletons</strong> (the canonical cluster file)</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-matching-cases/preprocessing_v3.py</code> + <code>name_standardization.py</code></td>
+<td>4 (also 2 by reuse)</td>
+<td>Two-stage name preprocessor</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-matching-cases/add_cluster_representatives.py</code></td>
+<td>4</td>
+<td>Adds <code>cluster_representative</code> to both ADDRESS parquets</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-matching-cases/match_r_to_c_cases.py</code></td>
+<td>4</td>
+<td>Hybrid / exact / fuzzy / cluster matching</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-matching-cases/rc_ac_matches.parquet</code> (+ <code>_summary.txt</code>)</td>
+<td>4</td>
+<td>Fuzzy/hybrid output, 50,472 pairs</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-matching-cases/rc_ac_cluster_matches_20260517.parquet</code> (+ <code>_summary.txt</code>)</td>
+<td>4</td>
+<td>Cluster-exact output, 60,731 pairs</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-matching-cases/compare_matching_methods.ipynb</code></td>
+<td>4</td>
+<td>Builds agreement / fuzzy-only / cluster-only pools</td>
+</tr>
+<tr class="even">
+<td><code>nlrb-matching-cases/build_evaluation_sample.ipynb</code></td>
+<td>4</td>
+<td>250-pair stratified audit</td>
+</tr>
+<tr class="odd">
+<td><code>nlrb-matching-cases/analyze_evaluation_results.ipynb</code></td>
+<td>4</td>
+<td>Per-cell precision + Wilson CIs</td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

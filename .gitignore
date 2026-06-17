@@ -1,0 +1,19 @@
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Quarto/pandoc HTML render sidecars (regenerable from the .md sources)
+*_files/
+
+# Data files — large and/or regenerable; kept on disk, out of version control
+*.parquet
+*.csv
+*.db
+*.pkl
+*.npy
+*.zip
+
+# Exception: keep the hand-labeled evaluation ground truth (small, NOT regenerable)
+# and its unblinding key, so the audit is reproducible from a fresh clone.
+!evaluation/evaluation_sample.csv
+!evaluation/evaluation_sample_key.csv

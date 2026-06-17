@@ -2,8 +2,12 @@
 NLRB R-Case to C-Case Matching (v2 — with fuzzy matching)
 ==========================================================
 Matches RC-type R Cases to CA-type C Cases based on:
-  1. Establishment identity (company_name + state + city)
+  1. Establishment identity (company_name + state + city + NLRB region)
   2. Temporal overlap (C case filed between R case filed and closed dates)
+
+NLRB region is the leading two digits of the case number (e.g. "07-CA-034444"
+-> region "07") and is treated as an equi-key, exactly like state: a genuine
+RC–CA pair for the same workplace is filed in the same Regional Office.
 
 Match modes (set via --match-mode):
   exact  — original behaviour: equi-join on normalised company + state + city
@@ -13,7 +17,8 @@ Match modes (set via --match-mode):
            matches are strictly additive (new RC–CA pairs only)
 
 The fuzzy pass:
-  - Blocks on normalised state (exact) to keep the candidate space tractable.
+  - Blocks on normalised state + region (exact) to keep the candidate
+    space tractable.
   - Within each state block, uses token_sort_ratio from rapidfuzz to compare
     preprocessed company names. Pairs above --fuzzy-threshold (default 82)
     are kept.
@@ -93,7 +98,7 @@ OUTPUT_DIR = DATA_DIR
 # HELPER: normalise location fields (state, city) for matching
 # ---------------------------------------------------------------------------
 def normalise_location(series: pd.Series) -> pd.Series:
-    """
+    """wha
     Lowercase, strip whitespace, collapse multiple spaces, and remove
     common punctuation so that location strings match despite minor
     formatting differences.
@@ -206,14 +211,32 @@ def load_and_prepare(company_column="company_name"):
     ac = filter_case_numbers(ac, column="company_name")
 
     # ---- Preprocess company names (advanced pipeline) ----
-    print(f"\nPreprocessing company names (source column: {company_column}) …")
-    for df in [rc, ac]:
-        df["match_company"] = preprocess_company_series(df[company_column])
+    # Only the raw company_name column needs cleaning. cluster_representative
+    # was already preprocessed upstream by add_cluster_representatives.py, so
+    # re-running the pipeline on it would be a redundant second pass (the
+    # pipeline is not fully idempotent — e.g. a dotted "L.L.C." only loses its
+    # suffix on the second pass). We deliberately preprocess exactly once.
+    if company_column == "company_name":
+        print(f"\nPreprocessing company names (source column: {company_column}) …")
+        for df in [rc, ac]:
+            df["match_company"] = preprocess_company_series(df[company_column])
+    else:
+        print(f"\nUsing pre-cleaned company names as-is (source column: "
+              f"{company_column}; already preprocessed upstream) …")
+        for df in [rc, ac]:
+            df["match_company"] = df[company_column].fillna("").astype(str)
 
     # ---- Normalise location fields (simple lowercase / whitespace) ----
     for df in [rc, ac]:
         df["match_state"] = normalise_location(df["state"])
         df["match_city"]  = normalise_location(df["city"])
+
+    # ---- Extract NLRB Region (leading two digits of the case number) ----
+    # Region behaves exactly like state: an equi-key. A genuine RC–CA pair
+    # is filed in the same Regional Office (e.g. "07-CA-034444" -> "07"), so
+    # company + state + city + region must all agree.
+    rc["match_region"] = rc["r_case_number"].astype(str).str.extract(r"^(\d{2})-")[0].fillna("")
+    ac["match_region"] = ac["c_case_number"].astype(str).str.extract(r"^(\d{2})-")[0].fillna("")
 
     # ---- Drop rows where any matching key is empty after normalisation ----
     for label, df in [("RC", rc), ("AC", ac)]:
@@ -250,7 +273,8 @@ def _prepare_slim_frames(rc: pd.DataFrame, ac: pd.DataFrame):
     """
     rc_slim = rc[["r_case_number", "date_filed", "date_closed",
                    "company_name", "state", "city",
-                   "match_company", "match_state", "match_city"]].copy()
+                   "match_company", "match_state", "match_city",
+                   "match_region"]].copy()
     rc_slim.rename(columns={"date_filed":    "r_date_filed",
                              "date_closed":   "r_date_closed",
                              "company_name":  "r_company_name",
@@ -272,7 +296,8 @@ def _prepare_slim_frames(rc: pd.DataFrame, ac: pd.DataFrame):
 
     ac_slim = ac[["c_case_number", "date_filed",
                    "company_name", "state", "city",
-                   "match_company", "match_state", "match_city"]].copy()
+                   "match_company", "match_state", "match_city",
+                   "match_region"]].copy()
     ac_slim.rename(columns={"date_filed":    "c_date_filed",
                              "company_name":  "c_company_name",
                              "state":         "c_state",
@@ -346,7 +371,7 @@ def match_exact(
     for chunk in tqdm(chunks, desc="Exact RC → AC", unit="chunk"):
         merged = chunk.merge(
             ac_slim,
-            on=["match_company", "match_state"],
+            on=["match_company", "match_state", "match_region"],
             how="inner",
             suffixes=("", "_ac"),
         )
@@ -421,21 +446,22 @@ def match_fuzzy(
 
     print(f"\n── Fuzzy matching (company threshold={fuzzy_threshold}, "
           f"city threshold={city_threshold}) ──")
-    print(f"  Blocking on normalised state …")
+    print(f"  Blocking on normalised state + region …")
 
-    # Group by state
-    rc_by_state = dict(list(rc_slim.groupby("match_state")))
-    ac_by_state = dict(list(ac_slim.groupby("match_state")))
+    # Group by (state, region) — region is an equi-key, exactly like state,
+    # so fuzzy name comparison only happens within the same Region.
+    rc_by_block = dict(list(rc_slim.groupby(["match_state", "match_region"])))
+    ac_by_block = dict(list(ac_slim.groupby(["match_state", "match_region"])))
 
-    states_shared = sorted(set(rc_by_state) & set(ac_by_state))
-    print(f"  States with both RC and AC cases: {len(states_shared)}")
+    blocks_shared = sorted(set(rc_by_block) & set(ac_by_block))
+    print(f"  (state, region) blocks with both RC and AC cases: {len(blocks_shared)}")
 
     result_parts = []
     total_candidates = 0
 
-    for state in tqdm(states_shared, desc="Fuzzy by state", unit="state"):
-        rc_state = rc_by_state[state]
-        ac_state = ac_by_state[state]
+    for block in tqdm(blocks_shared, desc="Fuzzy by state+region", unit="block"):
+        rc_state = rc_by_block[block]
+        ac_state = ac_by_block[block]
 
         # --- Build unique company-name lists for this state ---
         rc_names = rc_state["match_company"].unique().tolist()

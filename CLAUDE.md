@@ -57,12 +57,12 @@ Link NLRB union organizing petitions (RC-type R Cases) to unfair labor practice 
 | Notebook | Purpose |
 |----------|---------|
 | `compare_matching_methods.ipynb` | Compares fuzzy vs cluster matching results: pair-level overlap, RC/CA-level overlap, samples |
-| `build_evaluation_sample.ipynb` | Builds the stratified 250-pair evaluation sample (blinded, seeded) |
-| `analyze_evaluation_results.ipynb` | Unblinds labels and reports per-cell precision with Wilson CIs |
+| `evaluation/build_evaluation_sample.ipynb` | Builds the stratified 250-pair evaluation sample (blinded, seeded) |
+| `evaluation/analyze_evaluation_results.ipynb` | Unblinds labels and reports per-cell precision with Wilson CIs |
 
 ## Schema
 
-See `nlrb_schema_diagram.md` for the full ER diagram. Key relationships:
+See `schema/nlrb_schema_diagram.md` for the full ER diagram. Key relationships:
 - `R_CASES` 1:1 `R_CASES_ADDRESS` (joined on `r_case_number`)
 - `C_CASES` 1:1 `C_CASES_ADDRESS` (joined on `c_case_number`)
 - `R_CASES` 1:many `ELECTIONS` (not used in matching)
